@@ -628,7 +628,7 @@ export function updateProgress(message: string, progress?: number): void {
   progressContainer.style.display = '';
   progressText.textContent = message;
   if (progress !== undefined) {
-    progressFill.style.width = Math.min(100, Math.max(0, progress)) + '%';
+    progressFill.style.width = Math.min(100, Math.max(0, progress * 100)) + '%';
   }
 }
 
