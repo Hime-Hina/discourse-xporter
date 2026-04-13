@@ -1,0 +1,231 @@
+import { describe, it, expect } from 'vitest';
+import type { ProcessedPost } from '../src/types';
+import {
+  buildFrontmatter,
+  renderTemplate,
+  buildTemplateVars,
+} from '../src/core/formatter';
+import type { FrontmatterData, TemplateVars } from '../src/core/formatter';
+
+function mockPost(overrides: Partial<ProcessedPost> = {}): ProcessedPost {
+  return {
+    post_number: 1,
+    username: 'alice',
+    name: 'Alice Wang',
+    avatar_url: 'https://example.com/avatar.png',
+    created_at: '2026-04-12T10:30:00.000Z',
+    trust_level: 2,
+    is_op: false,
+    reply_to_post_number: null,
+    likes: 5,
+    reactions: [{ id: 'heart', type: '❤️', count: 5 }],
+    edit_count: 0,
+    is_wiki: false,
+    post_url: 'https://example.com/t/test-topic/12345/1',
+    content: 'Hello world',
+    selected: false,
+    ...overrides,
+  };
+}
+
+describe('buildFrontmatter', () => {
+  it('generates valid YAML with all fields', () => {
+    const data: FrontmatterData = {
+      title: 'Test Topic',
+      source: 'https://example.com/t/test-topic/123',
+      author: 'alice',
+      category: 'General',
+      tags: ['tag1', 'tag2'],
+      created: '2026-04-12 10:30',
+      exported: '2026-04-12 12:00',
+      discourse: {
+        topic_id: 123,
+        posts_count: 10,
+        views: 500,
+        likes: 42,
+        participants: 5,
+      },
+    };
+    const result = buildFrontmatter(data);
+    expect(result).toContain('---');
+    expect(result).toContain('title: Test Topic');
+    expect(result).toContain('source: "https://example.com/t/test-topic/123"');
+    expect(result).toContain('author: alice');
+    expect(result).toContain('category: General');
+    expect(result).toContain('  - tag1');
+    expect(result).toContain('  - tag2');
+    expect(result).toContain('topic_id: 123');
+    expect(result).toContain('posts_count: 10');
+    expect(result).toContain('views: 500');
+    expect(result).toContain('likes: 42');
+    expect(result).toContain('participants: 5');
+  });
+
+  it('escapes special chars in title', () => {
+    const data: FrontmatterData = {
+      title: 'Title with: colon & "quotes"',
+      source: 'https://example.com',
+      author: 'bob',
+      category: 'Test',
+      tags: [],
+      created: '2026-01-01',
+      exported: '2026-01-01',
+      discourse: {
+        topic_id: 1,
+        posts_count: 1,
+        views: 1,
+        likes: 0,
+        participants: 1,
+      },
+    };
+    const result = buildFrontmatter(data);
+    expect(result).toContain('title: "Title with: colon & \\"quotes\\""');
+  });
+});
+
+describe('renderTemplate', () => {
+  it('replaces all template variables', () => {
+    const template = '## #{{post_number}} by {{author_full}} on {{date}}';
+    const vars: TemplateVars = {
+      post_number: 3,
+      floor_link: '#3',
+      username: 'alice',
+      author: 'Alice Wang',
+      author_full: 'Alice Wang (@alice)',
+      avatar_url: 'https://example.com/avatar.png',
+      date: '2026-04-12 10:30',
+      date_iso: '2026-04-12T10:30:00.000Z',
+      likes: 5,
+      likes_display: ' · ❤️ 5',
+      reply_to: '',
+      reply_to_display: '',
+      trust_level: 2,
+      is_op: false,
+      op_badge: '',
+      op_badge_display: '',
+      post_url: 'https://example.com/t/test/123/3',
+      reactions: '❤️ 5',
+      edit_count: 0,
+      is_wiki: false,
+      content: 'Hello world',
+      highlight: '',
+      block_ref: '',
+    };
+    const result = renderTemplate(template, vars);
+    expect(result).toBe('## #3 by Alice Wang (@alice) on 2026-04-12 10:30');
+  });
+
+  it('leaves unknown variables as-is', () => {
+    const template = '{{post_number}} and {{nonexistent}}';
+    const vars: TemplateVars = {
+      post_number: 1,
+      floor_link: '#1',
+      username: 'a',
+      author: 'a',
+      author_full: '@a',
+      avatar_url: '',
+      date: '',
+      date_iso: '',
+      likes: 0,
+      likes_display: '',
+      reply_to: '',
+      reply_to_display: '',
+      trust_level: 0,
+      is_op: false,
+      op_badge: '',
+      op_badge_display: '',
+      post_url: '',
+      reactions: '',
+      edit_count: 0,
+      is_wiki: false,
+      content: '',
+      highlight: '',
+      block_ref: '',
+    };
+    const result = renderTemplate(template, vars);
+    expect(result).toContain('1');
+    expect(result).toContain('{{nonexistent}}');
+  });
+
+  it('handles $ in content without duplicating template prefix', () => {
+    const template = '## #{{post_number}} by {{author_full}}\n\n{{content}}';
+    const vars: TemplateVars = {
+      post_number: 1,
+      floor_link: '#1',
+      username: 'alice',
+      author: 'Alice',
+      author_full: 'Alice (@alice)',
+      avatar_url: '',
+      date: '',
+      date_iso: '',
+      likes: 0,
+      likes_display: '',
+      reply_to: '',
+      reply_to_display: '',
+      trust_level: 0,
+      is_op: false,
+      op_badge: '',
+      op_badge_display: '',
+      post_url: '',
+      reactions: '',
+      edit_count: 0,
+      is_wiki: false,
+      content: 'Terminal prompt is `~ $` and `root@host:~#`',
+      highlight: '',
+      block_ref: '',
+    };
+    const result = renderTemplate(template, vars);
+    // $ should not cause the template prefix to be duplicated
+    expect(result).toBe('## #1 by Alice (@alice)\n\nTerminal prompt is `~ $` and `root@host:~#`');
+    // Should appear exactly once
+    expect(result.match(/## #1/g)?.length).toBe(1);
+  });
+});
+
+describe('buildTemplateVars', () => {
+  it('generates correct author_full for user with name', () => {
+    const vars = buildTemplateVars(
+      mockPost({ username: 'alice', name: 'Alice Wang' }),
+      'https://example.com',
+      12345,
+    );
+    expect(vars.author_full).toBe('Alice Wang (@alice)');
+  });
+
+  it('generates correct author_full for user without name', () => {
+    const vars = buildTemplateVars(
+      mockPost({ username: 'bob', name: '' }),
+      'https://example.com',
+      12345,
+    );
+    expect(vars.author_full).toBe('@bob');
+  });
+
+  it('sets likes_display empty when likes is 0', () => {
+    const vars = buildTemplateVars(
+      mockPost({ likes: 0 }),
+      'https://example.com',
+      12345,
+    );
+    expect(vars.likes_display).toBe('');
+  });
+
+  it('sets op_badge for OP', () => {
+    const vars = buildTemplateVars(
+      mockPost({ is_op: true }),
+      'https://example.com',
+      12345,
+    );
+    expect(vars.op_badge).toBe('🏠 楼主');
+    expect(vars.op_badge_display).toContain('🏠 楼主');
+  });
+
+  it('sets empty op_badge for non-OP', () => {
+    const vars = buildTemplateVars(
+      mockPost({ is_op: false }),
+      'https://example.com',
+      12345,
+    );
+    expect(vars.op_badge).toBe('');
+  });
+});

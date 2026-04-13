@@ -1,0 +1,31 @@
+{
+  "name": "discourse-xporter",
+  "version": "1.0.0",
+  "description": "Export Discourse topics to Obsidian Markdown",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "eslint src/",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "devDependencies": {
+    "@types/turndown": "^5.0.5",
+    "eslint": "^9.0.0",
+    "jsdom": "^29.0.2",
+    "prettier": "^3.3.0",
+    "typescript": "^5.5.0",
+    "vite": "^6.0.0",
+    "vite-plugin-monkey": "^4.0.0",
+    "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "turndown": "^7.2.0",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "packageManager": "pnpm@10.20.0+sha512.cf9998222162dd85864d0a8102e7892e7ba4ceadebbf5a31f9c2fce48dfce317a9c53b9f6464d1ef9042cba2e02ae02a9f7c143a2b438cd93c91840f0192b9dd"
+}
