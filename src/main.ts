@@ -606,38 +606,31 @@ async function handleCopyPost(
 
 // ==================== Init ====================
 
-/** Inject export toggle button into the topic title area */
+/** Inject export toggle button into the topic title area (static + sticky header) */
 function injectGlobalToggle(): void {
-  const id = 'dxp-global-toggle';
-  if (document.getElementById(id)) return;
+  const cls = 'dxp-global-toggle';
 
-  const btn = document.createElement('button');
-  btn.id = id;
-  btn.className = 'dxp-global-toggle';
-  btn.title = 'Discourse Xporter';
-  btn.textContent = '📤';
-  btn.addEventListener('click', (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    togglePanel();
-  });
-
-  // Try multiple injection targets (flat view → nested view)
+  // Try multiple injection targets (flat view → sticky header → nested view)
+  // For sticky header, use .topic-header-extra (flex) instead of .title-wrapper (grid)
+  // to avoid disrupting the grid layout
   const targets = [
     document.querySelector('#topic-title .title-wrapper'),
-    document.querySelector('.extra-info-wrapper .title-wrapper'),
+    document.querySelector('.extra-info-wrapper .topic-header-extra'),
     document.querySelector('.nested-view__header'),
   ];
 
   for (const target of targets) {
-    if (target && !target.querySelector(`#${id}`)) {
-      target.appendChild(btn.cloneNode(true) as HTMLElement);
-      const injected = target.querySelector(`#${id}`) as HTMLElement;
-      injected?.addEventListener('click', (e) => {
+    if (target && !target.querySelector(`.${cls}`)) {
+      const btn = document.createElement('button');
+      btn.className = cls;
+      btn.title = 'Discourse Xporter';
+      btn.textContent = '📤';
+      btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         togglePanel();
       });
+      target.appendChild(btn);
     }
   }
 }
