@@ -1,4 +1,4 @@
-import type { Config, RangeMode, ImageMode, ImageFilter } from '../types';
+import type { Config, RangeMode, ImageMode, ImageDirMode, ImageFilter } from '../types';
 import { getConfig, saveConfig } from '../config/storage';
 
 export interface PanelCallbacks {
@@ -296,8 +296,17 @@ function buildPanel(cfg: Config): HTMLElement {
     },
     ['🔗 测试连接'],
   );
+  const sslHint = h(
+    'div',
+    {
+      className: 'dxp-hint',
+      style: 'font-size:11px;color:var(--primary-medium,#888);margin-top:4px;display:none',
+    },
+    [],
+  );
   btnTest.addEventListener('click', async () => {
     btnTest.textContent = '⏳ 连接中…';
+    sslHint.style.display = 'none';
     try {
       const res = await fetch(inApiUrl.value.trim() + '/', {
         headers: inApiKey.value
@@ -307,6 +316,13 @@ function buildPanel(cfg: Config): HTMLElement {
       btnTest.textContent = res.ok ? '✅ 连接成功' : `❌ ${res.status}`;
     } catch {
       btnTest.textContent = '❌ 连接失败';
+      // Show SSL hint if using HTTPS localhost
+      const url = inApiUrl.value.trim();
+      if (/^https:\/\/(127\.0\.0\.1|localhost)/i.test(url)) {
+        sslHint.textContent =
+          '⚠️ HTTPS 本地连接需先在浏览器访问该地址并接受自签名证书，或改用 http://127.0.0.1:27124';
+        sslHint.style.display = '';
+      }
     }
     setTimeout(() => {
       btnTest.textContent = '🔗 测试连接';
@@ -329,36 +345,76 @@ function buildPanel(cfg: Config): HTMLElement {
     h('option', { value: 'none' }, ['忽略图片 (none)']),
   ]) as HTMLSelectElement;
   selImgMode.value = cfg.imgMode;
-  const imgDirField = field(
-    '图片目录',
-    (() => {
-      const inp = h('input', {
-        type: 'text',
-        value: cfg.imgDir,
-      }) as HTMLInputElement;
-      inp.addEventListener('change', () =>
-        patchConfig((c) => {
-          c.imgDir = inp.value.trim();
-        }),
-      );
-      return inp;
-    })(),
+
+  // Image directory mode selector
+  const selImgDirMode = h('select', undefined, [
+    h('option', { value: 'relative' }, ['导出目录下的子文件夹']),
+    h('option', { value: 'absolute' }, ['Vault 中的指定路径']),
+  ]) as HTMLSelectElement;
+  selImgDirMode.value = cfg.imgDirMode;
+
+  const inImgDir = h('input', {
+    type: 'text',
+    value: cfg.imgDir,
+    placeholder: cfg.imgDirMode === 'relative' ? '留空则存放在导出目录下' : 'Discourse/attachments',
+  }) as HTMLInputElement;
+  inImgDir.addEventListener('change', () =>
+    patchConfig((c) => {
+      c.imgDir = inImgDir.value.trim();
+    }),
   );
-  imgDirField.style.display = cfg.imgMode === 'file' ? '' : 'none';
+
+  const imgDirModeLabel = h('div', {
+    style: 'font-size:11px;color:var(--primary-medium,#888);margin-bottom:4px',
+  }, [
+    cfg.imgDirMode === 'relative'
+      ? `实际路径: ${cfg.exportDir}/${cfg.imgDir || ''}`.replace(/\/+$/, '')
+      : `实际路径: ${cfg.imgDir}`,
+  ]);
+
+  function updateImgDirHint(): void {
+    const mode = selImgDirMode.value as ImageDirMode;
+    const dir = inImgDir.value.trim();
+    const exportDir = inExportDir.value.trim();
+    if (mode === 'relative') {
+      inImgDir.placeholder = '留空则存放在导出目录下';
+      imgDirModeLabel.textContent = `实际路径: ${dir ? exportDir + '/' + dir : exportDir}`;
+    } else {
+      inImgDir.placeholder = 'Discourse/attachments';
+      imgDirModeLabel.textContent = `实际路径: ${dir || '(未指定)'}`;
+    }
+  }
+
+  selImgDirMode.addEventListener('change', () => {
+    patchConfig((c) => {
+      c.imgDirMode = selImgDirMode.value as ImageDirMode;
+    });
+    updateImgDirHint();
+  });
+  inImgDir.addEventListener('input', updateImgDirHint);
+  inExportDir.addEventListener('input', updateImgDirHint);
+
+  const imgDirGroup = h('div', { className: 'dxp-img-dir-group' });
+  const imgDirModeField = field('图片存放位置', selImgDirMode);
+  const imgDirPathField = field('文件夹名', inImgDir);
+  imgDirGroup.append(imgDirModeField, imgDirPathField, imgDirModeLabel);
+  imgDirGroup.style.display = cfg.imgMode === 'file' ? '' : 'none';
+
   selImgMode.addEventListener('change', () => {
     patchConfig((c) => {
       c.imgMode = selImgMode.value as ImageMode;
     });
-    imgDirField.style.display = selImgMode.value === 'file' ? '' : 'none';
+    imgDirGroup.style.display = selImgMode.value === 'file' ? '' : 'none';
   });
 
   const obsSection = collapsible('Obsidian 连接设置', [
     field('API 地址', inApiUrl),
     field('API Key', inApiKey),
     btnTest,
+    sslHint,
     field('导出目录', inExportDir),
     field('图片模式', selImgMode),
-    imgDirField,
+    imgDirGroup,
   ]);
 
   // ---- Filter settings ----
