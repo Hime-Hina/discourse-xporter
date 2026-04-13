@@ -35,16 +35,20 @@ describe('buildFrontmatter', () => {
       source: 'https://example.com/t/test-topic/123',
       author: 'alice',
       category: 'General',
+      forum: 'LINUX DO',
       tags: ['tag1', 'tag2'],
       created: '2026-04-12 10:30',
       exported: '2026-04-12 12:00',
-      discourse: {
-        topic_id: 123,
-        posts_count: 10,
-        views: 500,
-        likes: 42,
-        participants: 5,
-      },
+      topic_id: 123,
+      slug: 'test-topic',
+      posts_count: 10,
+      reply_count: 8,
+      views: 500,
+      likes: 42,
+      word_count: 3000,
+      participants: 5,
+      closed: false,
+      archived: false,
     };
     const result = buildFrontmatter(data);
     expect(result).toContain('---');
@@ -52,13 +56,20 @@ describe('buildFrontmatter', () => {
     expect(result).toContain('source: "https://example.com/t/test-topic/123"');
     expect(result).toContain('author: alice');
     expect(result).toContain('category: General');
+    expect(result).toContain('forum: LINUX DO');
     expect(result).toContain('  - tag1');
     expect(result).toContain('  - tag2');
     expect(result).toContain('topic_id: 123');
+    expect(result).toContain('slug: test-topic');
     expect(result).toContain('posts_count: 10');
+    expect(result).toContain('reply_count: 8');
     expect(result).toContain('views: 500');
     expect(result).toContain('likes: 42');
+    expect(result).toContain('word_count: 3000');
     expect(result).toContain('participants: 5');
+    // closed/archived false → should not appear
+    expect(result).not.toContain('closed');
+    expect(result).not.toContain('archived');
   });
 
   it('escapes special chars in title', () => {
@@ -67,16 +78,20 @@ describe('buildFrontmatter', () => {
       source: 'https://example.com',
       author: 'bob',
       category: 'Test',
+      forum: 'example.com',
       tags: [],
       created: '2026-01-01',
       exported: '2026-01-01',
-      discourse: {
-        topic_id: 1,
-        posts_count: 1,
-        views: 1,
-        likes: 0,
-        participants: 1,
-      },
+      topic_id: 1,
+      slug: 'test',
+      posts_count: 1,
+      reply_count: 0,
+      views: 1,
+      likes: 0,
+      word_count: 100,
+      participants: 1,
+      closed: false,
+      archived: false,
     };
     const result = buildFrontmatter(data);
     expect(result).toContain('title: "Title with: colon & \\"quotes\\""');

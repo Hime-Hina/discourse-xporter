@@ -19,13 +19,17 @@ export interface FrontmatterData {
   tags: string[];
   created: string;
   exported: string;
-  discourse: {
-    topic_id: number;
-    posts_count: number;
-    views: number;
-    likes: number;
-    participants: number;
-  };
+  forum: string;
+  topic_id: number;
+  slug: string;
+  posts_count: number;
+  reply_count: number;
+  views: number;
+  likes: number;
+  word_count: number;
+  participants: number;
+  closed: boolean;
+  archived: boolean;
 }
 
 /** Escape a YAML string value */
@@ -59,21 +63,31 @@ export function buildFrontmatter(data: FrontmatterData): string {
       ? '\n' + data.tags.map((t) => `  - ${t}`).join('\n')
       : ' []';
 
-  return `---
-title: ${yamlStr(data.title)}
-source: ${yamlStr(data.source)}
-author: ${yamlStr(data.author)}
-category: ${yamlStr(data.category)}
-tags:${tags}
-created: ${data.created}
-exported: ${data.exported}
-discourse:
-  topic_id: ${data.discourse.topic_id}
-  posts_count: ${data.discourse.posts_count}
-  views: ${data.discourse.views}
-  likes: ${data.discourse.likes}
-  participants: ${data.discourse.participants}
----`;
+  const lines = [
+    '---',
+    `title: ${yamlStr(data.title)}`,
+    `source: ${yamlStr(data.source)}`,
+    `author: ${yamlStr(data.author)}`,
+    `category: ${yamlStr(data.category)}`,
+    `forum: ${yamlStr(data.forum)}`,
+    `tags:${tags}`,
+    `created: ${data.created}`,
+    `exported: ${data.exported}`,
+    `topic_id: ${data.topic_id}`,
+    `slug: ${yamlStr(data.slug)}`,
+    `posts_count: ${data.posts_count}`,
+    `reply_count: ${data.reply_count}`,
+    `views: ${data.views}`,
+    `likes: ${data.likes}`,
+    `word_count: ${data.word_count}`,
+    `participants: ${data.participants}`,
+  ];
+
+  if (data.closed) lines.push('closed: true');
+  if (data.archived) lines.push('archived: true');
+
+  lines.push('---');
+  return lines.join('\n');
 }
 
 // ==================== Floor Template ====================
