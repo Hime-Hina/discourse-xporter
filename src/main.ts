@@ -85,6 +85,30 @@ function getTopicInfo(): { topicId: number; isNested: boolean } | null {
 
 // ==================== Image Collection ====================
 
+/** Resolve the effective image directory path based on imgDirMode */
+function resolveImgDir(config: Config): string {
+  if (config.imgDirMode === 'absolute') return config.imgDir;
+  // relative mode: relative to exportDir
+  if (!config.imgDir) return config.exportDir;
+  return `${config.exportDir}/${config.imgDir}`;
+}
+
+/** Extract forum display name from the page */
+function getForumName(): string {
+  // Try og:site_name meta tag first
+  const ogSiteName = document.querySelector('meta[property="og:site_name"]');
+  if (ogSiteName?.getAttribute('content')) {
+    return ogSiteName.getAttribute('content')!.trim();
+  }
+  // Fallback to the Discourse site heading / logo text
+  const logoText =
+    document.querySelector('#site-text-logo')?.textContent??
+    document.querySelector('.header-title .logo-text')?.textContent;
+  if (logoText?.trim()) return logoText.trim();
+  // Last resort: hostname
+  return location.hostname;
+}
+
 function collectImageUrls(markdown: string): Map<string, string> {
   const urlToFilename = new Map<string, string>();
   const regex = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
@@ -183,25 +207,31 @@ async function doExport(mode: 'obsidian' | 'zip' | 'md'): Promise<void> {
     });
 
     // 7. Build document
+    const forumName = getForumName();
+    const forumTag = forumName.replace(/\s+/g, '-');
     const tags =
       topic.tags?.map((t) => (typeof t === 'string' ? t : t.name)) ?? [];
-    tags.push('discourse');
+    tags.push(forumTag);
 
     const frontmatter = buildFrontmatter({
       title: topic.title,
       source: `${origin}/t/topic/${info.topicId}`,
       author: topic.details.created_by.username,
       category: categoryName,
+      forum: forumName,
       tags,
       created: new Date(topic.created_at).toISOString(),
       exported: new Date().toISOString(),
-      discourse: {
-        topic_id: info.topicId,
-        posts_count: topic.posts_count,
-        views: topic.views,
-        likes: topic.like_count,
-        participants: topic.participant_count,
-      },
+      topic_id: info.topicId,
+      slug: topic.slug,
+      posts_count: topic.posts_count,
+      reply_count: topic.reply_count,
+      views: topic.views,
+      likes: topic.like_count,
+      word_count: topic.word_count ?? 0,
+      participants: topic.participant_count,
+      closed: topic.closed,
+      archived: topic.archived,
     });
 
     const template = config.floorTemplate || DEFAULT_FLOOR_TEMPLATE;
@@ -250,9 +280,10 @@ async function exportAsZip(
   }
 
   // Rewrite image paths for ZIP
+  const effectiveImgDir = resolveImgDir(config);
   let md = markdown;
   for (const [url, filename] of imageUrls) {
-    md = md.replaceAll(url, `${config.imgDir}/${topicId}/${filename}`);
+    md = md.replaceAll(url, `${effectiveImgDir}/${topicId}/${filename}`);
   }
 
   // Download images
@@ -290,7 +321,7 @@ async function exportAsZip(
   const zipBytes = buildZip(
     `${safeTitle}.md`,
     md,
-    config.imgDir,
+    effectiveImgDir,
     topicId,
     images,
   );
@@ -332,6 +363,7 @@ async function exportToObsidian(
   }
 
   let md = markdown;
+  const effectiveImgDir = resolveImgDir(config);
 
   if (config.imgMode === 'file') {
     // Collect image URLs BEFORE rewriting
@@ -348,7 +380,7 @@ async function exportToObsidian(
             uploaded / imageUrls.size,
           );
           const binary = await fetchBinary(url);
-          const imgPath = `${config.imgDir}/${topicId}/${filename}`;
+          const imgPath = `${effectiveImgDir}/${topicId}/${filename}`;
           const mime = guessMime(filename);
           await writeBinary(apiCfg, imgPath, binary, mime);
         } catch {
@@ -358,7 +390,7 @@ async function exportToObsidian(
     }
 
     // Rewrite image paths to Obsidian wikilinks
-    md = rewriteImagePathsForObsidian(md, topicId, config.imgDir);
+    md = rewriteImagePathsForObsidian(md, topicId, effectiveImgDir);
   } else if (config.imgMode === 'none') {
     md = stripImages(md);
   }
