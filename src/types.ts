@@ -142,6 +142,7 @@ export interface UploadLookupResult {
 // ==================== App Types ====================
 
 export type ImageMode = 'file' | 'embed' | 'none';
+export type ImageDirMode = 'relative' | 'absolute';
 export type WriteMode = 'overwrite' | 'append';
 export type ImageFilter = 'none' | 'withImg' | 'noImg';
 export type RangeMode = 'all' | 'range' | 'selected';
@@ -150,6 +151,7 @@ export interface Config {
   // Export
   exportDir: string;
   imgMode: ImageMode;
+  imgDirMode: ImageDirMode;
   imgDir: string;
 
   // Obsidian API

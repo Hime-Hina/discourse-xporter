@@ -11,7 +11,8 @@ export const DEFAULTS: Config = {
   // Export
   exportDir: 'Discourse',
   imgMode: 'file',
-  imgDir: 'Discourse/attachments',
+  imgDirMode: 'relative',
+  imgDir: 'attachments',
 
   // Obsidian API
   obsApiUrl: 'https://127.0.0.1:27124',
