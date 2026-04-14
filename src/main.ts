@@ -85,10 +85,18 @@ function getTopicInfo(): { topicId: number; isNested: boolean } | null {
 
 // ==================== Image Collection ====================
 
-/** Format a Date as YYYY-MM-DDTHH:mm:ss in UTC+8 (Obsidian Date & Time format) */
+/** Format a Date as YYYY-MM-DDTHH:mm:ss in Asia/Shanghai (Obsidian Date & Time format) */
 function toLocalISO(date: Date): string {
-  const d = new Date(date.getTime() + 8 * 3600_000);
-  return d.toISOString().slice(0, 19);
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  });
+  const p = Object.fromEntries(
+    fmt.formatToParts(date).map(({ type, value }) => [type, value]),
+  );
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}`;
 }
 
 /** Resolve the effective image directory path based on imgDirMode */
