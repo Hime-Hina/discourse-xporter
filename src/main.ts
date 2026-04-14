@@ -85,6 +85,12 @@ function getTopicInfo(): { topicId: number; isNested: boolean } | null {
 
 // ==================== Image Collection ====================
 
+/** Format a Date as YYYY-MM-DDTHH:mm:ss in UTC+8 (Obsidian Date & Time format) */
+function toLocalISO(date: Date): string {
+  const d = new Date(date.getTime() + 8 * 3600_000);
+  return d.toISOString().slice(0, 19);
+}
+
 /** Resolve the effective image directory path based on imgDirMode */
 function resolveImgDir(config: Config): string {
   if (config.imgDirMode === 'absolute') return config.imgDir;
@@ -220,8 +226,8 @@ async function doExport(mode: 'obsidian' | 'zip' | 'md'): Promise<void> {
       category: categoryName,
       forum: forumName,
       tags,
-      created: new Date(topic.created_at).toISOString(),
-      exported: new Date().toISOString(),
+      created: toLocalISO(new Date(topic.created_at)),
+      exported: toLocalISO(new Date()),
       topic_id: info.topicId,
       slug: topic.slug,
       posts_count: topic.posts_count,
