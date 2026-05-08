@@ -103,20 +103,20 @@ export async function resolveUploadUrls(
 
 /** Fetch category name by ID. Falls back to DOM extraction. */
 export async function fetchCategoryName(categoryId: number): Promise<string> {
-  // Try DOM first (faster, no extra request)
-  const breadcrumb = document.querySelector(
+  // Try DOM first — select LAST breadcrumb item (handles subcategories)
+  const breadcrumbs = document.querySelectorAll(
     '.category-breadcrumb .badge-category__name',
   );
-  if (breadcrumb?.textContent) return breadcrumb.textContent.trim();
+  const lastBreadcrumb = breadcrumbs[breadcrumbs.length - 1];
+  if (lastBreadcrumb?.textContent) return lastBreadcrumb.textContent.trim();
 
+  // Fallback: /site.json contains ALL categories including subcategories
   try {
-    const res = await fetch('/categories.json');
+    const res = await fetch('/site.json');
     if (res.ok) {
       const data = await res.json();
-      const categories = data.category_list?.categories ?? [];
-      const cat = categories.find(
-        (c: { id: number; name: string }) => c.id === categoryId,
-      );
+      const cat = (data.categories as { id: number; name: string }[] | undefined)
+        ?.find((c) => c.id === categoryId);
       if (cat) return cat.name;
     }
   } catch {
