@@ -1,10 +1,16 @@
 declare function GM_addStyle(css: string): void;
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 /** Show a toast notification at the top center of the page */
 export function showToast(
   message: string,
   type: 'success' | 'info' | 'error' = 'success',
   duration = 2500,
+  action?: ToastAction,
 ): void {
   // Remove existing toast
   const existing = document.querySelector('.dxp-toast');
@@ -12,7 +18,22 @@ export function showToast(
 
   const toast = document.createElement('div');
   toast.className = 'dxp-toast';
-  toast.textContent = message;
+
+  const msgSpan = document.createElement('span');
+  msgSpan.textContent = message;
+  toast.appendChild(msgSpan);
+
+  if (action) {
+    const btn = document.createElement('button');
+    btn.className = 'dxp-toast-action';
+    btn.textContent = action.label;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toast.remove();
+      action.onClick();
+    });
+    toast.appendChild(btn);
+  }
 
   const bgColor =
     type === 'error'
@@ -35,12 +56,15 @@ export function showToast(
     fontSize: '14px',
     fontWeight: '500',
     transition: 'opacity 0.3s',
-    pointerEvents: 'none',
+    pointerEvents: action ? 'auto' : 'none',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
   });
 
   document.body.appendChild(toast);
   setTimeout(() => {
     toast.style.opacity = '0';
     setTimeout(() => toast.remove(), 300);
-  }, duration);
+  }, action ? 8000 : duration);
 }

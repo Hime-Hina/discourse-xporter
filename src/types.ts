@@ -146,6 +146,7 @@ export type ImageDirMode = 'relative' | 'absolute';
 export type WriteMode = 'overwrite' | 'append';
 export type ImageFilter = 'none' | 'withImg' | 'noImg';
 export type RangeMode = 'all' | 'range' | 'selected';
+export type PanelCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
 export interface Config {
   // Export
@@ -177,7 +178,7 @@ export interface Config {
   imageDelayMax: number;
 
   // UI
-  panelPos: { top: number; left: number } | null;
+  panelCorner: PanelCorner;
 
   // Debug
   debugMode: boolean;

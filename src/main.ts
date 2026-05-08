@@ -27,11 +27,15 @@ import { buildZip } from './export/zip-export';
 import {
   testConnection,
   searchByTopicId,
+  searchOutdatedByTopicId,
+  searchByOrigin,
+  getNoteMetadata,
   noteExists,
   writeNote,
   writeBinary,
   openNote,
 } from './export/obsidian-api';
+import type { ObsidianApiConfig, NoteMetadata } from './export/obsidian-api';
 import { injectStyles } from './ui/styles';
 import { showToast } from './ui/toast';
 import {
@@ -40,6 +44,7 @@ import {
   resetProgress,
   getPanelFilterConfig,
   togglePanel,
+  setExportLock,
 } from './ui/panel';
 import {
   initFloorButtons,
@@ -50,6 +55,9 @@ import {
 import { safeFilename, extractFilename } from './utils/filename';
 import { isEmojiUrl, isAvatarUrl, topicUrl } from './utils/url';
 import { DEFAULT_FLOOR_TEMPLATE } from './config/defaults';
+
+/** Format version — increment only on incompatible output format changes */
+export const FORMAT_VERSION = 1;
 
 declare function GM_registerMenuCommand(
   caption: string,
@@ -151,6 +159,7 @@ async function doExport(mode: 'obsidian' | 'zip' | 'md'): Promise<void> {
   const config = getConfig();
   const filters = getPanelFilterConfig();
 
+  setExportLock(true);
   try {
     // 1. Fetch topic
     debugLog('Starting export, mode:', mode, 'topicId:', info.topicId);
@@ -246,6 +255,7 @@ async function doExport(mode: 'obsidian' | 'zip' | 'md'): Promise<void> {
       participants: topic.participant_count,
       closed: topic.closed,
       archived: topic.archived,
+      xporter_version: FORMAT_VERSION,
     });
 
     const template = config.floorTemplate || DEFAULT_FLOOR_TEMPLATE;
@@ -275,6 +285,7 @@ async function doExport(mode: 'obsidian' | 'zip' | 'md'): Promise<void> {
       5000,
     );
   } finally {
+    setExportLock(false);
     resetProgress();
   }
 }
@@ -649,6 +660,213 @@ function injectGlobalToggle(): void {
   }
 }
 
+// ==================== Outdated Note Check ====================
+
+let outdatedCheckDone = false;
+
+async function checkOutdatedNote(topicId: number): Promise<void> {
+  if (outdatedCheckDone) return;
+  outdatedCheckDone = true;
+
+  const config = getConfig();
+  if (!config.obsApiKey) return;
+
+  const apiCfg: ObsidianApiConfig = { apiUrl: config.obsApiUrl, apiKey: config.obsApiKey };
+
+  try {
+    const outdated = await searchOutdatedByTopicId(apiCfg, topicId, FORMAT_VERSION);
+    if (outdated) {
+      showToast('该话题的笔记格式已过期，建议重新导出', 'info', 8000, {
+        label: '重新导出',
+        onClick: () => void doExport('obsidian'),
+      });
+    }
+  } catch {
+    // Silent ignore — don't block page
+  }
+}
+
+// ==================== Batch Re-export ====================
+
+export interface BatchItem {
+  path: string;
+  title: string;
+  topicId: number;
+  xporterVersion: number;
+}
+
+export async function scanExportedNotes(): Promise<BatchItem[]> {
+  const config = getConfig();
+  const apiCfg: ObsidianApiConfig = { apiUrl: config.obsApiUrl, apiKey: config.obsApiKey };
+  const origin = window.location.origin;
+
+  const filenames = await searchByOrigin(apiCfg, origin);
+  const items: BatchItem[] = [];
+
+  for (const filename of filenames) {
+    const meta = await getNoteMetadata(apiCfg, filename);
+    if (meta) {
+      items.push({
+        path: meta.path,
+        title: meta.title,
+        topicId: meta.topicId,
+        xporterVersion: meta.xporterVersion,
+      });
+    }
+  }
+
+  return items;
+}
+
+export async function doBatchReExport(
+  items: BatchItem[],
+  onProgress: (current: number, total: number, title: string) => void,
+): Promise<{ success: number; failed: number }> {
+  const config = getConfig();
+  const apiCfg: ObsidianApiConfig = { apiUrl: config.obsApiUrl, apiKey: config.obsApiKey };
+  const origin = window.location.origin;
+  let success = 0;
+  let failed = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    onProgress(i + 1, items.length, item.title);
+
+    if (i > 0) {
+      const delay =
+        Math.floor(Math.random() * (config.batchDelayMax - config.batchDelayMin + 1)) +
+        config.batchDelayMin;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+
+    try {
+      await reExportSingleTopic(item, config, apiCfg, origin);
+      success++;
+    } catch (err) {
+      console.warn(`[DXP] Batch re-export failed for topic ${item.topicId}:`, err);
+      // Retry once on 429
+      if (err instanceof Error && err.message.includes('429')) {
+        await new Promise((r) => setTimeout(r, config.batchDelayMax * 2));
+        try {
+          await reExportSingleTopic(item, config, apiCfg, origin);
+          success++;
+          continue;
+        } catch {
+          // give up
+        }
+      }
+      failed++;
+    }
+  }
+
+  return { success, failed };
+}
+
+async function reExportSingleTopic(
+  item: BatchItem,
+  config: Config,
+  apiCfg: ObsidianApiConfig,
+  origin: string,
+): Promise<void> {
+  // 1. Fetch topic
+  const topic = await fetchTopic(item.topicId);
+
+  // 2. Fetch all posts
+  const allPosts = await fetchAllPosts(
+    item.topicId,
+    topic.post_stream.stream,
+    topic.post_stream.posts,
+    config,
+    () => {},
+  );
+
+  // 3. Resolve uploads
+  const allUploadUrls: string[] = [];
+  for (const p of allPosts) {
+    if (p.raw) {
+      const matches = p.raw.match(/upload:\/\/[a-zA-Z0-9._-]+/g);
+      if (matches) allUploadUrls.push(...matches);
+    }
+  }
+  const uploadMap = await resolveUploadUrls(allUploadUrls);
+
+  // 4. Category
+  const categoryName = await fetchCategoryName(topic.category_id);
+
+  // 5. Process all posts (no filters — full re-export)
+  const processedPosts: ProcessedPost[] = allPosts.map((post) => {
+    const ctx: PipelineContext = {
+      origin,
+      topicId: item.topicId,
+      topicSlug: topic.slug,
+      polls: post.polls ?? [],
+      cookedHtml: post.cooked,
+      config,
+      uploadMap,
+    };
+    return processPost(post, topic.user_id, ctx, false);
+  });
+
+  // 6. Build document
+  const forumName = getForumName();
+  const forumTag = forumName.replace(/\s+/g, '-');
+  const tags = topic.tags?.map((t) => (typeof t === 'string' ? t : t.name)) ?? [];
+  tags.push(forumTag);
+
+  const frontmatter = buildFrontmatter({
+    title: topic.title,
+    source: `${origin}/t/topic/${item.topicId}`,
+    author: topic.details.created_by.username,
+    category: categoryName,
+    forum: forumName,
+    tags,
+    created: toLocalISO(new Date(topic.created_at)),
+    exported: toLocalISO(new Date()),
+    topic_id: item.topicId,
+    slug: topic.slug,
+    posts_count: topic.posts_count,
+    reply_count: topic.reply_count,
+    views: topic.views,
+    likes: topic.like_count,
+    word_count: topic.word_count ?? 0,
+    participants: topic.participant_count,
+    closed: topic.closed,
+    archived: topic.archived,
+    xporter_version: FORMAT_VERSION,
+  });
+
+  const template = config.floorTemplate || DEFAULT_FLOOR_TEMPLATE;
+  const markdown = assembleDocument(frontmatter, processedPosts, template, origin, item.topicId);
+
+  // 7. Handle images if file mode
+  let md = markdown;
+  const effectiveImgDir = resolveImgDir(config);
+
+  if (config.imgMode === 'file') {
+    const imageUrls = collectImageUrls(md);
+    if (imageUrls.size > 0) {
+      for (const [url, filename] of imageUrls) {
+        try {
+          const binary = await fetchBinary(url);
+          const imgPath = `${effectiveImgDir}/${item.topicId}/${filename}`;
+          const mime = guessMime(filename);
+          await writeBinary(apiCfg, imgPath, binary, mime);
+        } catch {
+          // skip failed images
+        }
+      }
+    }
+    md = rewriteImagePathsForObsidian(md, item.topicId, effectiveImgDir);
+  } else if (config.imgMode === 'none') {
+    md = stripImages(md);
+  }
+
+  // 8. Write note (use same path or new path if title changed)
+  const safeTitle = safeFilename(topic.title);
+  const notePath = `${config.exportDir}/${safeTitle}.md`;
+  await writeNote(apiCfg, notePath, md);
+}
+
 function init(): void {
   if (!isDiscourse()) return;
 
@@ -672,6 +890,9 @@ function init(): void {
     onExportObsidian: () => doExport('obsidian'),
     onDownloadZip: () => doExport('zip'),
     onDownloadMd: () => doExport('md'),
+    onBatchScan: scanExportedNotes,
+    onBatchReExport: doBatchReExport,
+    formatVersion: FORMAT_VERSION,
   });
 
   // Register menu command
@@ -681,6 +902,9 @@ function init(): void {
   injectGlobalToggle();
   const observer = new MutationObserver(() => injectGlobalToggle());
   observer.observe(document.body, { childList: true, subtree: true });
+
+  // Async: check for outdated notes (passive reminder)
+  void checkOutdatedNote(info.topicId);
 }
 
 init();

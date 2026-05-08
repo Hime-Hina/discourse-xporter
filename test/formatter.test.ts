@@ -49,9 +49,11 @@ describe('buildFrontmatter', () => {
       participants: 5,
       closed: false,
       archived: false,
+      xporter_version: 1,
     };
     const result = buildFrontmatter(data);
     expect(result).toContain('---');
+    expect(result).toContain('xporter_version: 1');
     expect(result).toContain('title: Test Topic');
     expect(result).toContain('source: "https://example.com/t/test-topic/123"');
     expect(result).toContain('author: alice');
@@ -92,6 +94,7 @@ describe('buildFrontmatter', () => {
       participants: 1,
       closed: false,
       archived: false,
+      xporter_version: 1,
     };
     const result = buildFrontmatter(data);
     expect(result).toContain('title: "Title with: colon & \\"quotes\\""');

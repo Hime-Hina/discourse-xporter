@@ -37,7 +37,7 @@ export const DEFAULTS: Config = {
   imageDelayMax: 800,
 
   // UI
-  panelPos: null,
+  panelCorner: 'bottom-right',
 
   // Debug
   debugMode: false,

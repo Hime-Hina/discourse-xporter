@@ -30,6 +30,7 @@ export interface FrontmatterData {
   participants: number;
   closed: boolean;
   archived: boolean;
+  xporter_version: number;
 }
 
 /** Escape a YAML string value */
@@ -65,6 +66,7 @@ export function buildFrontmatter(data: FrontmatterData): string {
 
   const lines = [
     '---',
+    `xporter_version: ${data.xporter_version}`,
     `title: ${yamlStr(data.title)}`,
     `source: ${yamlStr(data.source)}`,
     `author: ${yamlStr(data.author)}`,

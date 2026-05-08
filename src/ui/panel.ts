@@ -1,10 +1,24 @@
-import type { Config, RangeMode, ImageMode, ImageDirMode, ImageFilter } from '../types';
+import type { Config, RangeMode, ImageMode, ImageDirMode, ImageFilter, PanelCorner } from '../types';
 import { getConfig, saveConfig } from '../config/storage';
+import { showToast } from './toast';
+
+export interface BatchItem {
+  path: string;
+  title: string;
+  topicId: number;
+  xporterVersion: number;
+}
 
 export interface PanelCallbacks {
   onExportObsidian: () => Promise<void>;
   onDownloadZip: () => Promise<void>;
   onDownloadMd: () => Promise<void>;
+  onBatchScan: () => Promise<BatchItem[]>;
+  onBatchReExport: (
+    items: BatchItem[],
+    onProgress: (current: number, total: number, title: string) => void,
+  ) => Promise<{ success: number; failed: number }>;
+  formatVersion: number;
 }
 
 // ==================== DOM refs ====================
@@ -14,6 +28,15 @@ let progressContainer: HTMLElement | null = null;
 let progressFill: HTMLElement | null = null;
 let progressText: HTMLElement | null = null;
 let callbacks: PanelCallbacks | null = null;
+
+// Export button refs (for disabling during export)
+let exportButtons: HTMLButtonElement[] = [];
+let exporting = false;
+
+// Batch state
+let batchCache: BatchItem[] | null = null;
+let batchScanning = false;
+let batchExporting = false;
 
 // ==================== Helpers ====================
 
@@ -63,7 +86,11 @@ function checkboxRow(
   return row;
 }
 
-function collapsible(title: string, children: HTMLElement[]): HTMLElement {
+function collapsible(
+  title: string,
+  children: HTMLElement[],
+  onToggle?: (open: boolean) => void,
+): HTMLElement {
   const section = h('div', { className: 'dxp-section' });
   const header = h('div', { className: 'dxp-section-header' }, [
     h('span', undefined, [title]),
@@ -73,114 +100,40 @@ function collapsible(title: string, children: HTMLElement[]): HTMLElement {
   for (const c of children) body.append(c);
   header.addEventListener('click', () => {
     section.classList.toggle('dxp-open');
-    // Auto-clamp panel within viewport after section expand/collapse
-    requestAnimationFrame(clampToViewport);
+    onToggle?.(section.classList.contains('dxp-open'));
   });
   section.append(header, body);
   return section;
 }
 
-// ==================== Viewport clamping ====================
+// ==================== Corner positioning ====================
 
-function clampToViewport(): void {
+const CORNER_MARGIN = 20;
+
+function applyCorner(corner: PanelCorner): void {
   if (!panelEl) return;
-  const rect = panelEl.getBoundingClientRect();
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-
-  let needsAdjust = false;
-  let newTop = panelEl.offsetTop;
-  let newLeft = panelEl.offsetLeft;
-
-  // If panel extends beyond bottom, shift up
-  if (rect.bottom > vh) {
-    newTop = Math.max(0, vh - rect.height);
-    needsAdjust = true;
-  }
-  // If panel extends beyond right, shift left
-  if (rect.right > vw) {
-    newLeft = Math.max(0, vw - rect.width);
-    needsAdjust = true;
-  }
-  // Ensure top-left is within viewport
-  if (rect.top < 0) {
-    newTop = 0;
-    needsAdjust = true;
-  }
-  if (rect.left < 0) {
-    newLeft = 0;
-    needsAdjust = true;
-  }
-
-  if (needsAdjust) {
-    panelEl.style.top = newTop + 'px';
-    panelEl.style.left = newLeft + 'px';
-    panelEl.style.right = 'auto';
-    panelEl.style.bottom = 'auto';
-  }
+  const s = panelEl.style;
+  s.top = corner.startsWith('top') ? CORNER_MARGIN + 'px' : 'auto';
+  s.bottom = corner.startsWith('bottom') ? CORNER_MARGIN + 'px' : 'auto';
+  s.left = corner.endsWith('left') ? CORNER_MARGIN + 'px' : 'auto';
+  s.right = corner.endsWith('right') ? CORNER_MARGIN + 'px' : 'auto';
 }
 
-// ==================== Dragging ====================
-
-let dragging = false;
-let dragOffsetX = 0;
-let dragOffsetY = 0;
-
-function onMouseDown(e: MouseEvent): void {
-  if (!panelEl || !panelEl.classList.contains('dxp-draggable')) return;
-  dragging = true;
-  dragOffsetX = e.clientX - panelEl.offsetLeft;
-  dragOffsetY = e.clientY - panelEl.offsetTop;
-  panelEl.style.cursor = 'grabbing';
-  e.preventDefault();
-}
-
-function onMouseMove(e: MouseEvent): void {
-  if (!dragging || !panelEl) return;
-  const x = Math.max(
-    0,
-    Math.min(e.clientX - dragOffsetX, window.innerWidth - panelEl.offsetWidth),
-  );
-  const y = Math.max(
-    0,
-    Math.min(
-      e.clientY - dragOffsetY,
-      window.innerHeight - panelEl.offsetHeight,
-    ),
-  );
-  panelEl.style.left = x + 'px';
-  panelEl.style.top = y + 'px';
-  panelEl.style.right = 'auto';
-  panelEl.style.bottom = 'auto';
-}
-
-function onMouseUp(): void {
-  if (!dragging || !panelEl) return;
-  dragging = false;
-  panelEl.style.cursor = '';
-  persistPosition();
-}
-
-function persistPosition(): void {
-  if (!panelEl) return;
+function cycleCorner(): void {
+  const order: PanelCorner[] = ['bottom-right', 'bottom-left', 'top-left', 'top-right'];
   const cfg = getConfig();
-  cfg.panelPos = { top: panelEl.offsetTop, left: panelEl.offsetLeft };
+  const idx = order.indexOf(cfg.panelCorner);
+  const next = order[(idx + 1) % order.length];
+  cfg.panelCorner = next;
   saveConfig(cfg);
+  applyCorner(next);
 }
 
-function applyPosition(cfg: Config): void {
-  if (!panelEl) return;
-  if (cfg.panelPos) {
-    panelEl.style.top = cfg.panelPos.top + 'px';
-    panelEl.style.left = cfg.panelPos.left + 'px';
-    panelEl.style.right = 'auto';
-    panelEl.style.bottom = 'auto';
-  } else {
-    panelEl.style.right = '20px';
-    panelEl.style.bottom = '20px';
-    panelEl.style.top = 'auto';
-    panelEl.style.left = 'auto';
-  }
+// ==================== Export lock ====================
+
+function setExporting(val: boolean): void {
+  exporting = val;
+  for (const btn of exportButtons) btn.disabled = val;
 }
 
 // ==================== Config save helper ====================
@@ -198,19 +151,12 @@ function buildPanel(cfg: Config): HTMLElement {
   panel.style.display = 'none';
 
   // ---- Header ----
-  const dragToggle = h(
+  const cornerBtn = h(
     'button',
-    { className: 'dxp-drag-toggle', title: '拖拽解锁' },
-    ['🔒'],
+    { className: 'dxp-drag-toggle', title: '切换面板位置' },
+    ['📌'],
   );
-  let locked = true;
-
-  dragToggle.addEventListener('click', () => {
-    locked = !locked;
-    dragToggle.textContent = locked ? '🔒' : '🔓';
-    panel.classList.toggle('dxp-draggable', !locked);
-    if (locked) persistPosition();
-  });
+  cornerBtn.addEventListener('click', cycleCorner);
 
   const closeBtn = h('button', { className: 'dxp-close-btn', title: '关闭' }, [
     '×',
@@ -218,7 +164,7 @@ function buildPanel(cfg: Config): HTMLElement {
   closeBtn.addEventListener('click', () => hidePanel());
 
   const headerBtns = h('div', { className: 'dxp-header-btns' }, [
-    dragToggle,
+    cornerBtn,
     closeBtn,
   ]);
 
@@ -226,7 +172,6 @@ function buildPanel(cfg: Config): HTMLElement {
     h('span', undefined, ['Discourse Xporter']),
     headerBtns,
   ]);
-  header.addEventListener('mousedown', onMouseDown);
 
   // ---- Progress ----
   const pFill = h('div', { className: 'dxp-progress-fill' });
@@ -245,26 +190,28 @@ function buildPanel(cfg: Config): HTMLElement {
   // ---- Main buttons ----
   const btnObsidian = h('button', { className: 'dxp-btn dxp-btn-primary' }, [
     '📤 导出到 Obsidian',
-  ]);
+  ]) as HTMLButtonElement;
   btnObsidian.addEventListener('click', () => {
     if (callbacks?.onExportObsidian) void callbacks.onExportObsidian();
   });
 
   const btnZip = h('button', { className: 'dxp-btn dxp-btn-secondary' }, [
     '📦 下载 ZIP',
-  ]);
+  ]) as HTMLButtonElement;
   btnZip.addEventListener('click', () => {
     if (callbacks?.onDownloadZip) void callbacks.onDownloadZip();
   });
 
   const btnMd = h('button', { className: 'dxp-btn dxp-btn-secondary' }, [
     '📝 下载 Markdown',
-  ]);
+  ]) as HTMLButtonElement;
   btnMd.addEventListener('click', () => {
     if (callbacks?.onDownloadMd) void callbacks.onDownloadMd();
   });
 
   const btnGroup = h('div', { className: 'dxp-btn-group' }, [btnZip, btnMd]);
+
+  exportButtons = [btnObsidian, btnZip, btnMd];
 
   // ---- Obsidian connection settings ----
   const inApiUrl = h('input', {
@@ -316,7 +263,6 @@ function buildPanel(cfg: Config): HTMLElement {
       btnTest.textContent = res.ok ? '✅ 连接成功' : `❌ ${res.status}`;
     } catch {
       btnTest.textContent = '❌ 连接失败';
-      // Show SSL hint if using HTTPS localhost
       const url = inApiUrl.value.trim();
       if (/^https:\/\/(127\.0\.0\.1|localhost)/i.test(url)) {
         sslHint.textContent =
@@ -346,7 +292,6 @@ function buildPanel(cfg: Config): HTMLElement {
   ]) as HTMLSelectElement;
   selImgMode.value = cfg.imgMode;
 
-  // Image directory mode selector
   const selImgDirMode = h('select', undefined, [
     h('option', { value: 'relative' }, ['导出目录下的子文件夹']),
     h('option', { value: 'absolute' }, ['Vault 中的指定路径']),
@@ -417,7 +362,7 @@ function buildPanel(cfg: Config): HTMLElement {
     imgDirGroup,
   ]);
 
-  // ---- Filter settings ----
+  // ---- Filter settings (NOT persisted) ----
   const selRange = h('select', undefined, [
     h('option', { value: 'all' }, ['全部楼层']),
     h('option', { value: 'range' }, ['楼层范围']),
@@ -456,12 +401,9 @@ function buildPanel(cfg: Config): HTMLElement {
     rangeRow.style.display = selRange.value === 'range' ? 'flex' : 'none';
   });
 
-  const cbOnlyOp = { value: cfg.defaultOnlyOp };
-  const onlyOpRow = checkboxRow('只看楼主', cbOnlyOp.value, (v) => {
+  const cbOnlyOp = { value: false };
+  const onlyOpRow = checkboxRow('只看楼主', false, (v) => {
     cbOnlyOp.value = v;
-    patchConfig((c) => {
-      c.defaultOnlyOp = v;
-    });
   });
 
   const selImgFilter = h('select', undefined, [
@@ -469,12 +411,7 @@ function buildPanel(cfg: Config): HTMLElement {
     h('option', { value: 'withImg' }, ['仅含图片']),
     h('option', { value: 'noImg' }, ['无图片']),
   ]) as HTMLSelectElement;
-  selImgFilter.value = cfg.defaultImgFilter;
-  selImgFilter.addEventListener('change', () => {
-    patchConfig((c) => {
-      c.defaultImgFilter = selImgFilter.value as ImageFilter;
-    });
-  });
+  selImgFilter.value = 'none';
 
   const inUsers = h('input', {
     type: 'text',
@@ -504,6 +441,9 @@ function buildPanel(cfg: Config): HTMLElement {
     field('排除关键词', inExcKw),
     field('最少字数', inMinLen),
   ]);
+
+  // ---- Batch re-export section ----
+  const batchSection = buildBatchSection();
 
   // ---- Advanced settings ----
   const taTemplate = h('textarea', {
@@ -573,6 +513,7 @@ function buildPanel(cfg: Config): HTMLElement {
     btnGroup,
     obsSection,
     filterSection,
+    batchSection,
     advSection,
   ]);
 
@@ -595,6 +536,237 @@ function buildPanel(cfg: Config): HTMLElement {
   return panel;
 }
 
+// ==================== Batch Re-export (inline section) ====================
+
+// Batch UI refs
+let batchStatusEl: HTMLElement | null = null;
+let batchListEl: HTMLElement | null = null;
+let batchStartBtn: HTMLButtonElement | null = null;
+let batchSelAllBtn: HTMLButtonElement | null = null;
+let batchSelOutdatedBtn: HTMLButtonElement | null = null;
+let batchSelNoneBtn: HTMLButtonElement | null = null;
+let batchScanBtn: HTMLButtonElement | null = null;
+let batchCheckStates = new Map<number, boolean>();
+let batchCheckboxEls = new Map<number, HTMLInputElement>();
+
+function buildBatchSection(): HTMLElement {
+  batchStatusEl = h('div', {
+    className: 'dxp-batch-status',
+    style: 'font-size:12px;color:var(--primary-medium,#888);margin-bottom:6px',
+  }, ['点击扫描以查找已导出的笔记']);
+
+  batchListEl = h('div', { className: 'dxp-batch-list' });
+
+  // Action buttons row
+  batchSelAllBtn = h('button', { className: 'dxp-btn-mini' }, ['全选']) as HTMLButtonElement;
+  batchSelOutdatedBtn = h('button', { className: 'dxp-btn-mini' }, ['选过期']) as HTMLButtonElement;
+  batchSelNoneBtn = h('button', { className: 'dxp-btn-mini' }, ['取消']) as HTMLButtonElement;
+  batchStartBtn = h('button', { className: 'dxp-btn dxp-btn-primary', style: 'margin-top:6px;width:100%' }, [
+    '开始重导',
+  ]) as HTMLButtonElement;
+  batchStartBtn.disabled = true;
+
+  batchScanBtn = h('button', { className: 'dxp-btn dxp-btn-secondary', style: 'width:100%;margin-bottom:6px' }, [
+    '🔍 扫描笔记',
+  ]) as HTMLButtonElement;
+
+  const selBtnGroup = h('div', { className: 'dxp-batch-sel-group', style: 'display:none' }, [
+    batchSelAllBtn, batchSelOutdatedBtn, batchSelNoneBtn,
+  ]);
+
+  batchScanBtn.addEventListener('click', () => void doBatchScan());
+  batchSelAllBtn.addEventListener('click', () => batchSelectAll(true));
+  batchSelOutdatedBtn.addEventListener('click', () => batchSelectOutdated());
+  batchSelNoneBtn.addEventListener('click', () => batchSelectAll(false));
+  batchStartBtn.addEventListener('click', () => void doBatchExport());
+
+  const container = h('div', undefined, [
+    batchScanBtn,
+    batchStatusEl,
+    batchListEl,
+    selBtnGroup,
+    batchStartBtn,
+  ]);
+
+  // Store selBtnGroup ref
+  (container as any)._selGroup = selBtnGroup;
+
+  const section = collapsible('批量重导', [container], (open) => {
+    if (open && batchCache) {
+      // Show cached list immediately, then refresh in background
+      renderBatchList(batchCache);
+      void doBatchScan();
+    }
+  });
+
+  return section;
+}
+
+async function doBatchScan(): Promise<void> {
+  if (!callbacks || batchScanning || batchExporting) return;
+
+  const config = getConfig();
+  if (!config.obsApiKey) {
+    showToast('请先配置 Obsidian API Key', 'error');
+    return;
+  }
+
+  batchScanning = true;
+  if (batchScanBtn) {
+    batchScanBtn.disabled = true;
+    batchScanBtn.textContent = '⏳ 扫描中…';
+  }
+  if (batchStatusEl) batchStatusEl.textContent = '扫描中…';
+
+  try {
+    const items = await callbacks.onBatchScan();
+    batchCache = items;
+    renderBatchList(items);
+  } catch {
+    if (batchStatusEl) batchStatusEl.textContent = '扫描失败';
+  } finally {
+    batchScanning = false;
+    if (batchScanBtn) {
+      batchScanBtn.disabled = false;
+      batchScanBtn.textContent = '🔍 扫描笔记';
+    }
+  }
+}
+
+function renderBatchList(items: BatchItem[]): void {
+  if (!batchListEl || !batchStatusEl || !callbacks) return;
+  batchListEl.innerHTML = '';
+  batchCheckStates.clear();
+  batchCheckboxEls.clear();
+
+  const formatVersion = callbacks.formatVersion;
+  const hostname = window.location.hostname;
+
+  if (items.length === 0) {
+    batchStatusEl.textContent = '未找到来自当前论坛的导出笔记';
+    if (batchStartBtn) batchStartBtn.disabled = true;
+    return;
+  }
+
+  let outdatedCount = 0;
+  for (const item of items) {
+    const isOutdated = item.xporterVersion < formatVersion;
+    if (isOutdated) outdatedCount++;
+    batchCheckStates.set(item.topicId, isOutdated);
+
+    const row = h('label', { className: 'dxp-batch-row' });
+    const cb = h('input', { type: 'checkbox' }) as HTMLInputElement;
+    cb.checked = isOutdated;
+    batchCheckboxEls.set(item.topicId, cb);
+
+    cb.addEventListener('change', () => {
+      batchCheckStates.set(item.topicId, cb.checked);
+      updateBatchStartBtn();
+    });
+
+    const versionLabel = isOutdated
+      ? `v${item.xporterVersion || 0} → v${formatVersion}  ⚠️`
+      : `v${item.xporterVersion}  ✅`;
+    const versionSpan = h('span', {
+      className: isOutdated ? 'dxp-batch-outdated' : 'dxp-batch-uptodate',
+      style: 'margin-left:auto;font-size:11px;white-space:nowrap',
+    }, [versionLabel]);
+
+    const titleSpan = h('span', {
+      style: 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',
+    }, [item.title]);
+
+    row.append(cb, titleSpan, versionSpan);
+    batchListEl.append(row);
+  }
+
+  batchStatusEl.textContent = `${hostname}: ${items.length} 篇 (${outdatedCount} 篇过期)`;
+
+  // Show selection buttons
+  const container = batchListEl.parentElement;
+  const selGroup = (container as any)?._selGroup as HTMLElement | undefined;
+  if (selGroup) selGroup.style.display = '';
+
+  updateBatchStartBtn();
+}
+
+function batchSelectAll(checked: boolean): void {
+  for (const [topicId, cb] of batchCheckboxEls) {
+    cb.checked = checked;
+    batchCheckStates.set(topicId, checked);
+  }
+  updateBatchStartBtn();
+}
+
+function batchSelectOutdated(): void {
+  if (!callbacks || !batchCache) return;
+  const fv = callbacks.formatVersion;
+  for (const item of batchCache) {
+    const isOutdated = item.xporterVersion < fv;
+    const cb = batchCheckboxEls.get(item.topicId);
+    if (cb) {
+      cb.checked = isOutdated;
+      batchCheckStates.set(item.topicId, isOutdated);
+    }
+  }
+  updateBatchStartBtn();
+}
+
+function getBatchSelectedCount(): number {
+  let n = 0;
+  for (const v of batchCheckStates.values()) if (v) n++;
+  return n;
+}
+
+function updateBatchStartBtn(): void {
+  if (!batchStartBtn || !batchCache) return;
+  const sel = getBatchSelectedCount();
+  batchStartBtn.textContent = `开始重导 (${sel}/${batchCache.length})`;
+  batchStartBtn.disabled = sel === 0 || batchExporting || exporting;
+}
+
+async function doBatchExport(): Promise<void> {
+  if (!callbacks || !batchCache || batchExporting || exporting) return;
+
+  const selected = batchCache.filter((it) => batchCheckStates.get(it.topicId));
+  if (selected.length === 0) return;
+
+  batchExporting = true;
+  setExporting(true);
+  if (batchStartBtn) {
+    batchStartBtn.textContent = '重导中…';
+    batchStartBtn.disabled = true;
+  }
+  if (batchScanBtn) batchScanBtn.disabled = true;
+
+  try {
+    const result = await callbacks.onBatchReExport(
+      selected,
+      (current, total, title) => {
+        updateProgress(`重导 ${current}/${total}：${title}`, current / total);
+      },
+    );
+
+    const msg = `批量重导完成：${result.success} 成功${result.failed > 0 ? `，${result.failed} 失败` : ''}`;
+    showToast(msg, result.failed > 0 ? 'error' : 'success', 4000);
+
+    // Re-scan to refresh status
+    void doBatchScan();
+  } catch (err) {
+    showToast(
+      `批量重导出错: ${err instanceof Error ? err.message : String(err)}`,
+      'error',
+      5000,
+    );
+  } finally {
+    batchExporting = false;
+    setExporting(false);
+    resetProgress();
+    if (batchScanBtn) batchScanBtn.disabled = false;
+    updateBatchStartBtn();
+  }
+}
+
 // ==================== Public API ====================
 
 export function initPanel(cb: PanelCallbacks): void {
@@ -603,11 +775,7 @@ export function initPanel(cb: PanelCallbacks): void {
   const cfg = getConfig();
   panelEl = buildPanel(cfg);
   document.body.append(panelEl);
-  applyPosition(cfg);
-
-  document.addEventListener('mousemove', onMouseMove);
-  document.addEventListener('mouseup', onMouseUp);
-  window.addEventListener('resize', clampToViewport);
+  applyCorner(cfg.panelCorner);
 }
 
 export function showPanel(): void {
@@ -637,6 +805,11 @@ export function resetProgress(): void {
   progressContainer.style.display = 'none';
   progressFill.style.width = '0%';
   progressText.textContent = '';
+}
+
+/** Called by main.ts before/after export to lock/unlock buttons */
+export function setExportLock(locked: boolean): void {
+  setExporting(locked);
 }
 
 export interface PanelFilterConfig {

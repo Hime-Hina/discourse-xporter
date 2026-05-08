@@ -27,11 +27,6 @@ export function injectStyles(): void {
   transition: box-shadow 0.2s;
 }
 
-.dxp-panel.dxp-draggable {
-  border-color: var(--tertiary, #0088cc);
-  box-shadow: 0 8px 32px rgba(0, 136, 204, 0.25);
-}
-
 .dxp-panel-header {
   display: flex;
   align-items: center;
@@ -307,6 +302,74 @@ export function injectStyles(): void {
 .dxp-close-btn:hover {
   background: var(--danger-low, rgba(200, 0, 0, 0.1));
   color: var(--danger, #d9534f);
+}
+
+/* Toast action button */
+.dxp-toast-action {
+  background: rgba(255,255,255,0.25);
+  border: 1px solid rgba(255,255,255,0.4);
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.dxp-toast-action:hover {
+  background: rgba(255,255,255,0.4);
+}
+
+/* Batch re-export (inline section) */
+.dxp-batch-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 4px 0;
+}
+
+.dxp-batch-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--primary-low, rgba(0,0,0,0.05));
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.dxp-batch-row:hover {
+  background: var(--primary-low, rgba(0,0,0,0.03));
+}
+
+.dxp-batch-outdated {
+  color: var(--danger, #d73a49);
+}
+
+.dxp-batch-uptodate {
+  color: var(--success, #28a745);
+}
+
+.dxp-batch-sel-group {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0;
+}
+
+.dxp-btn-mini {
+  padding: 2px 8px;
+  border: 1px solid var(--primary-low-mid, rgba(0,0,0,0.15));
+  border-radius: 4px;
+  background: var(--secondary, #fff);
+  color: var(--primary, #222);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dxp-btn-mini:hover {
+  background: var(--primary-low, rgba(0,0,0,0.06));
 }
 `;
 

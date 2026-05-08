@@ -92,13 +92,114 @@ export async function searchByTopicId(
       url: `${cfg.apiUrl}/search/`,
       headers: makeHeaders(cfg.apiKey, 'application/vnd.olrapi.jsonlogic+json'),
       data: JSON.stringify({
-        '==': [{ var: 'frontmatter.discourse.topic_id' }, topicId],
+        '==': [{ var: 'frontmatter.topic_id' }, topicId],
       }),
     });
     if (res.status === 200) {
       const results = JSON.parse(res.responseText);
       if (Array.isArray(results) && results.length > 0) {
         return results[0].filename;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+/** Search for outdated note by topic_id (version < formatVersion or missing) */
+export async function searchOutdatedByTopicId(
+  cfg: ObsidianApiConfig,
+  topicId: number,
+  formatVersion: number,
+): Promise<boolean> {
+  try {
+    const res = await gmRequest({
+      method: 'POST',
+      url: `${cfg.apiUrl}/search/`,
+      headers: makeHeaders(cfg.apiKey, 'application/vnd.olrapi.jsonlogic+json'),
+      data: JSON.stringify({
+        and: [
+          { '==': [{ var: 'frontmatter.topic_id' }, topicId] },
+          {
+            or: [
+              { '!': [{ var: 'frontmatter.xporter_version' }] },
+              { '<': [{ var: 'frontmatter.xporter_version' }, formatVersion] },
+            ],
+          },
+        ],
+      }),
+    });
+    if (res.status === 200) {
+      const results = JSON.parse(res.responseText);
+      return Array.isArray(results) && results.length > 0;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+/** Search all exported notes from a given origin */
+export async function searchByOrigin(
+  cfg: ObsidianApiConfig,
+  origin: string,
+): Promise<string[]> {
+  try {
+    const res = await gmRequest({
+      method: 'POST',
+      url: `${cfg.apiUrl}/search/`,
+      headers: makeHeaders(cfg.apiKey, 'application/vnd.olrapi.jsonlogic+json'),
+      data: JSON.stringify({
+        and: [
+          { glob: [`${origin}/*`, { var: 'frontmatter.source' }] },
+          { '!!': [{ var: 'frontmatter.topic_id' }] },
+        ],
+      }),
+    });
+    if (res.status === 200) {
+      const results = JSON.parse(res.responseText);
+      if (Array.isArray(results)) {
+        return results.map((r: { filename: string }) => r.filename);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+export interface NoteMetadata {
+  path: string;
+  title: string;
+  topicId: number;
+  xporterVersion: number;
+}
+
+/** Get frontmatter metadata from a note */
+export async function getNoteMetadata(
+  cfg: ObsidianApiConfig,
+  path: string,
+): Promise<NoteMetadata | null> {
+  try {
+    const res = await gmRequest({
+      method: 'GET',
+      url: `${cfg.apiUrl}/vault/${encodePath(path)}`,
+      headers: {
+        ...makeHeaders(cfg.apiKey),
+        Accept: 'application/vnd.olrapi.note+json',
+      },
+    });
+    if (res.status === 200) {
+      const data = JSON.parse(res.responseText);
+      const fm = data.frontmatter;
+      if (fm?.topic_id) {
+        return {
+          path,
+          title: fm.title ?? path,
+          topicId: Number(fm.topic_id),
+          xporterVersion: Number(fm.xporter_version) || 0,
+        };
       }
     }
   } catch {
