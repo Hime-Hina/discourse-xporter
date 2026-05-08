@@ -53,6 +53,7 @@ import {
   clearSelectedPosts,
 } from './ui/floor-buttons';
 import { safeFilename, extractFilename } from './utils/filename';
+import { escapeObsidianAlias, unescapeMarkdownLabel } from './utils/obsidian';
 import { isEmojiUrl, isAvatarUrl, topicUrl } from './utils/url';
 import { DEFAULT_FLOOR_TEMPLATE } from './config/defaults';
 
@@ -133,7 +134,7 @@ function getForumName(): string {
 
 function collectImageUrls(markdown: string): Map<string, string> {
   const urlToFilename = new Map<string, string>();
-  const regex = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
+  const regex = /!\[(?:\\.|[^\]\\])*\]\((https?:\/\/[^\s)]+)\)/g;
   let match: RegExpExecArray | null;
   let index = 0;
 
@@ -456,11 +457,12 @@ function rewriteImagePathsForObsidian(
   imgDir: string,
 ): string {
   return markdown.replace(
-    /!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g,
+    /!\[((?:\\.|[^\]\\])*)\]\((https?:\/\/[^\s)]+)\)/g,
     (_, alt: string, url: string) => {
       const filename = extractImageFilename(url);
       const path = `${imgDir}/${topicId}/${filename}`;
-      return alt ? `![[${path}|${alt}]]` : `![[${path}]]`;
+      const alias = escapeObsidianAlias(unescapeMarkdownLabel(alt));
+      return alias ? `![[${path}|${alias}]]` : `![[${path}]]`;
     },
   );
 }
@@ -477,7 +479,10 @@ function extractImageFilename(url: string): string {
 
 /** Strip all image markdown from text */
 function stripImages(markdown: string): string {
-  return markdown.replace(/!\[([^\]]*)\]\([^\s)]+\)/g, '$1');
+  return markdown.replace(
+    /!\[((?:\\.|[^\]\\])*)\]\([^\s)]+\)/g,
+    (_, alt: string) => unescapeMarkdownLabel(alt),
+  );
 }
 
 // ==================== Filters ====================

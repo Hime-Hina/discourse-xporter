@@ -8,6 +8,7 @@ import {
 import { replaceEmoji } from './emoji-map';
 import { cookedToMarkdown } from './cooked-fallback';
 import { resolveUrl, topicUrl } from '../utils/url';
+import { escapeObsidianAlias, unescapeMarkdownLabel } from '../utils/obsidian';
 
 /**
  * Process raw Markdown through the full transformation pipeline.
@@ -43,9 +44,20 @@ export function processRaw(raw: string, ctx: PipelineContext): string {
   // 9. Quote preview: bare site URL → callout (using cooked data)
   text = transformQuotePreviews(text, ctx);
 
+  // 10. Re-resolve relative links that steps 8/9 may have introduced
+  //     (turndown of cooked HTML can produce relative links like /t/slug/123)
+  text = resolveRelativeLinks(text, ctx.origin);
+
+  // 11. Escape Markdown link labels like [[1]](#footnote) that Obsidian
+  //     would otherwise read as wikilinks.
+  text = escapeBracketedLinkLabels(text);
+
   // NOTE: Image path rewriting (rewriteImagePaths) is intentionally NOT called here.
   // It's handled at export time in main.ts to avoid premature URL replacement
   // that would prevent image collection/download.
+
+  // 12. Make block/media boundaries explicit for Obsidian rendering.
+  text = normalizeObsidianSpacing(text);
 
   return text;
 }
@@ -57,7 +69,13 @@ export function resolveUploadShortUrls(
   uploadMap: Map<string, string>,
 ): string {
   for (const [shortUrl, fullUrl] of uploadMap) {
-    text = text.replaceAll(shortUrl, fullUrl);
+    // Match the short URL plus any trailing file extension (e.g. upload://abc.png)
+    // to avoid partial matches that leave a dangling extension (.png.png)
+    const escaped = shortUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    text = text.replace(
+      new RegExp(escaped + '(?:\\.[a-zA-Z0-9]+)?', 'g'),
+      fullUrl,
+    );
   }
   return text;
 }
@@ -403,7 +421,128 @@ export function transformQuotePreviews(
   });
 }
 
-// ==================== Step 10: Image path rewriting ====================
+// ==================== Obsidian spacing normalization ====================
+
+export function normalizeObsidianSpacing(text: string): string {
+  if (!text) return text;
+
+  const lines = text.split('\n');
+  const out: string[] = [];
+  let inFence = false;
+  let fenceMarker = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = line.match(/^ {0,3}(```+|~~~+)/);
+
+    if (fence) {
+      if (!inFence) {
+        inFence = true;
+        fenceMarker = fence[1][0];
+      } else if (fence[1][0] === fenceMarker) {
+        inFence = false;
+        fenceMarker = '';
+      }
+      out.push(line);
+      continue;
+    }
+
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+
+    if (startsStandaloneBlock(line) && needsBlankBefore(out, line)) {
+      out.push('');
+    }
+
+    out.push(line);
+
+    const next = lines[i + 1];
+    if (
+      next !== undefined &&
+      endsStandaloneBlock(line, next) &&
+      next.trim() !== ''
+    ) {
+      out.push('');
+    }
+  }
+
+  return out.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
+function startsStandaloneBlock(line: string): boolean {
+  return isQuoteLine(line) || isStandaloneImageLine(line);
+}
+
+function endsStandaloneBlock(line: string, next: string): boolean {
+  if (isStandaloneImageLine(line)) return !isStandaloneImageLine(next);
+  if (isQuoteLine(line)) return !isQuoteLine(next);
+  return false;
+}
+
+function needsBlankBefore(out: string[], line: string): boolean {
+  const previous = out[out.length - 1];
+  if (previous === undefined || previous.trim() === '') return false;
+  if (isQuoteLine(line) && isQuoteLine(previous)) return false;
+  if (isStandaloneImageLine(line) && isStandaloneImageLine(previous))
+    return false;
+  return true;
+}
+
+function isQuoteLine(line: string): boolean {
+  return /^>\s?/.test(line);
+}
+
+function isStandaloneImageLine(line: string): boolean {
+  return (
+    /^\s*!\[(?:\\.|[^\]\\])*\]\([^)]+\)\s*$/.test(line) ||
+    /^\s*!\[\[.+\]\]\s*$/.test(line)
+  );
+}
+
+// ==================== Link label escaping ====================
+
+export function escapeBracketedLinkLabels(text: string): string {
+  if (!text) return text;
+
+  return transformOutsideFences(text, (line) =>
+    line.replace(
+      /(^|[^!\\])\[\[([^\]\n]+)\]\]\(([^)\s]+)\)/g,
+      (_, prefix: string, label: string, href: string) =>
+        `${prefix}[\\[${label}\\]](${href})`,
+    ),
+  );
+}
+
+function transformOutsideFences(
+  text: string,
+  transformLine: (line: string) => string,
+): string {
+  const lines = text.split('\n');
+  let inFence = false;
+  let fenceMarker = '';
+
+  return lines
+    .map((line) => {
+      const fence = line.match(/^ {0,3}(```+|~~~+)/);
+      if (fence) {
+        if (!inFence) {
+          inFence = true;
+          fenceMarker = fence[1][0];
+        } else if (fence[1][0] === fenceMarker) {
+          inFence = false;
+          fenceMarker = '';
+        }
+        return line;
+      }
+
+      return inFence ? line : transformLine(line);
+    })
+    .join('\n');
+}
+
+// ==================== Image path rewriting ====================
 
 export function rewriteImagePaths(text: string, ctx: PipelineContext): string {
   const { imgMode, imgDir } = ctx.config;
@@ -413,10 +552,11 @@ export function rewriteImagePaths(text: string, ctx: PipelineContext): string {
   if (imgMode === 'file') {
     // Obsidian wikilink format: ![[filename|alt]]
     return text.replace(
-      /!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g,
+      /!\[((?:\\.|[^\]\\])*)\]\((https?:\/\/[^\s)]+)\)/g,
       (_, alt: string, url: string) => {
         const filename = extractImageFilename(url);
-        return alt ? `![[${filename}|${alt}]]` : `![[${filename}]]`;
+        const alias = escapeObsidianAlias(unescapeMarkdownLabel(alt));
+        return alias ? `![[${filename}|${alias}]]` : `![[${filename}]]`;
       },
     );
   }

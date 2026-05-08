@@ -3,6 +3,20 @@ import * as turndownPluginGfm from 'turndown-plugin-gfm';
 
 let _service: TurndownService | null = null;
 
+function escapeMarkdownLabel(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/([\[\]])/g, '\\$1');
+}
+
+function discourseFootnoteId(value: string | null | undefined): string {
+  if (!value) return '';
+  return value
+    .replace(/^#/, '')
+    .replace(/^fn-?/, '')
+    .replace(/^fnref-?/, '')
+    .replace(/^footnote-?/, '')
+    .replace(/^footnote-ref-?/, '');
+}
+
 /** Get singleton Turndown instance with Discourse-specific rules */
 function getService(): TurndownService {
   if (_service) return _service;
@@ -14,9 +28,6 @@ function getService(): TurndownService {
   });
 
   service.use(turndownPluginGfm.gfm);
-
-  // Disable escaping — raw already is Markdown
-  service.escape = (str: string) => str;
 
   // --- Custom rules for cooked-only scenarios ---
 
@@ -51,7 +62,7 @@ function getService(): TurndownService {
       const img = el.querySelector('img') as HTMLImageElement | null;
       const href = link?.href || img?.src || '';
       const alt = img?.alt || '';
-      return href ? `![${alt}](${href})` : '';
+      return href ? `\n\n![${escapeMarkdownLabel(alt)}](${href})\n\n` : '';
     },
   });
 
@@ -113,7 +124,10 @@ function getService(): TurndownService {
         '.title a[href]',
       ) as HTMLAnchorElement | null;
       if (titleLink?.href && post && topic) {
-        header += ` · [${titleLink.textContent?.trim() || `#${post}`}](${titleLink.href})`;
+        const title = escapeMarkdownLabel(
+          titleLink.textContent?.trim() || `#${post}`,
+        );
+        header += ` · [${title}](${titleLink.href})`;
       } else if (post) {
         header += ` · #${post}`;
       }
@@ -143,7 +157,7 @@ function getService(): TurndownService {
     replacement: (_content, node) => {
       const el = node as HTMLElement;
       const link = el.querySelector('a');
-      const id = link?.getAttribute('href')?.replace(/^#fn-/, '') || '';
+      const id = discourseFootnoteId(link?.getAttribute('href'));
       return id ? `[^${id}]` : '';
     },
   });
@@ -158,7 +172,7 @@ function getService(): TurndownService {
     },
     replacement: (content, node) => {
       const el = node as HTMLElement;
-      const id = el.id?.replace(/^fn-/, '') || '';
+      const id = discourseFootnoteId(el.id);
       const text = content.replace(/\s*↩︎\s*$/, '').trim();
       return id ? `[^${id}]: ${text}\n` : '';
     },

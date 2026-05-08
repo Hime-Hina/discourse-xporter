@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { PipelineContext } from '../src/types';
 import { DEFAULTS } from '../src/config/defaults';
 import {
+  processRaw,
   resolveUploadShortUrls,
   resolveRelativeLinks,
   transformQuotes,
@@ -9,6 +10,9 @@ import {
   transformDates,
   transformDetails,
   transformQuotePreviews,
+  normalizeObsidianSpacing,
+  escapeBracketedLinkLabels,
+  rewriteImagePaths,
 } from '../src/core/raw-pipeline';
 
 function mockCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
@@ -30,7 +34,8 @@ describe('resolveUploadShortUrls', () => {
       ['upload://abc123.png', 'https://example.com/uploads/abc123.png'],
       ['upload://xyz789.jpg', 'https://example.com/uploads/xyz789.jpg'],
     ]);
-    const input = 'Image: ![img](upload://abc123.png) and ![img2](upload://xyz789.jpg)';
+    const input =
+      'Image: ![img](upload://abc123.png) and ![img2](upload://xyz789.jpg)';
     const result = resolveUploadShortUrls(input, map);
     expect(result).toContain('https://example.com/uploads/abc123.png');
     expect(result).toContain('https://example.com/uploads/xyz789.jpg');
@@ -52,7 +57,9 @@ describe('resolveRelativeLinks', () => {
   it('resolves relative image links', () => {
     const input = '![alt](/uploads/default/image.png)';
     const result = resolveRelativeLinks(input, 'https://example.com');
-    expect(result).toBe('![alt](https://example.com/uploads/default/image.png)');
+    expect(result).toBe(
+      '![alt](https://example.com/uploads/default/image.png)',
+    );
   });
 
   it('returns empty for empty input', () => {
@@ -119,7 +126,8 @@ describe('transformPolls', () => {
 
 describe('transformDates', () => {
   it('formats date with time and timezone', () => {
-    const raw = 'Meeting: [date=2026-01-08 time=14:30:00 timezone="Asia/Shanghai"]';
+    const raw =
+      'Meeting: [date=2026-01-08 time=14:30:00 timezone="Asia/Shanghai"]';
     const result = transformDates(raw);
     expect(result).toContain('2026-01-08');
     expect(result).toContain('14:30');
@@ -166,5 +174,75 @@ describe('transformQuotes — block ref for same topic', () => {
     const raw = '[quote="alice, post:5"]\nHello\n[/quote]';
     const result = transformQuotes(raw, mockCtx({ topicId: 12345 }));
     expect(result).toContain('[[#^floor-5|#5]]');
+  });
+});
+
+describe('normalizeObsidianSpacing', () => {
+  it('separates standalone image lines from following text', () => {
+    const input = '![image](https://example.com/image.png)\nnext paragraph';
+    const result = normalizeObsidianSpacing(input);
+    expect(result).toBe(
+      '![image](https://example.com/image.png)\n\nnext paragraph',
+    );
+  });
+
+  it('separates transformed quote blocks from adjacent text', () => {
+    const input = 'before\n> [!quote] @alice\n> quoted\nafter';
+    const result = normalizeObsidianSpacing(input);
+    expect(result).toBe('before\n\n> [!quote] @alice\n> quoted\n\nafter');
+  });
+
+  it('does not rewrite fenced code block contents', () => {
+    const input =
+      '```\n![image](https://example.com/image.png)\nnext line\n```';
+    const result = normalizeObsidianSpacing(input);
+    expect(result).toBe(input);
+  });
+});
+
+describe('processRaw spacing', () => {
+  it('keeps image and text as separate Obsidian blocks', () => {
+    const raw = '![image](https://example.com/image.png)\ntext';
+    const result = processRaw(raw, mockCtx());
+    expect(result).toBe('![image](https://example.com/image.png)\n\ntext');
+  });
+});
+
+describe('escapeBracketedLinkLabels', () => {
+  it('escapes bracketed footnote link labels in raw quote content', () => {
+    const raw =
+      '[quote="alice, post:18, topic:999"]\nText[[1]](#footnote-164979-1)\n[/quote]';
+    const result = processRaw(raw, mockCtx({ topicId: 12345 }));
+
+    expect(result).toContain('Text[\\[1\\]](#footnote-164979-1)');
+    expect(result).not.toContain('[[1]](#footnote-164979-1)');
+  });
+
+  it('escapes bracketed image link labels without touching Obsidian links', () => {
+    const input =
+      'See [[image]](https://example.com/image.png) and [[#^floor-1|#1]].';
+    const result = escapeBracketedLinkLabels(input);
+
+    expect(result).toBe(
+      'See [\\[image\\]](https://example.com/image.png) and [[#^floor-1|#1]].',
+    );
+  });
+
+  it('does not rewrite fenced code block contents', () => {
+    const input = '```\n[[1]](#footnote-1)\n```\n[[1]](#footnote-1)';
+    const result = escapeBracketedLinkLabels(input);
+
+    expect(result).toBe('```\n[[1]](#footnote-1)\n```\n[\\[1\\]](#footnote-1)');
+  });
+});
+
+describe('rewriteImagePaths', () => {
+  it('escapes Obsidian image aliases with special characters', () => {
+    const result = rewriteImagePaths(
+      String.raw`![a\]b|c](https://example.com/image.png)`,
+      mockCtx({ config: { ...DEFAULTS, imgMode: 'file' } }),
+    );
+
+    expect(result).toBe(String.raw`![[image.png|a\]b&#124;c]]`);
   });
 });
