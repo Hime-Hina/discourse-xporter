@@ -1,3 +1,5 @@
+import { copyActiveBytesToArrayBuffer } from '../utils/binary';
+
 declare function GM_xmlhttpRequest(details: {
   method: string;
   url: string;
@@ -21,6 +23,36 @@ function makeHeaders(
     Authorization: `Bearer ${apiKey}`,
     'Content-Type': contentType,
   };
+}
+
+function apiUrl(cfg: ObsidianApiConfig, path: string): string {
+  const base = normalizeApiBase(cfg.apiUrl);
+  assertLocalApiUrl(base);
+  return `${base}${path}`;
+}
+
+function normalizeApiBase(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
+function assertLocalApiUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('Invalid Obsidian API URL');
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const isLocal =
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host === '[::1]';
+
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !isLocal) {
+    throw new Error('Obsidian API URL must point to localhost');
+  }
 }
 
 /** Promisified GM_xmlhttpRequest */
@@ -52,7 +84,7 @@ export async function testConnection(cfg: ObsidianApiConfig): Promise<boolean> {
   try {
     const res = await gmRequest({
       method: 'GET',
-      url: `${cfg.apiUrl}/`,
+      url: apiUrl(cfg, '/'),
       headers: makeHeaders(cfg.apiKey),
     });
     return res.status === 200;
@@ -69,7 +101,7 @@ export async function noteExists(
   try {
     const res = await gmRequest({
       method: 'GET',
-      url: `${cfg.apiUrl}/vault/${encodePath(path)}`,
+      url: apiUrl(cfg, `/vault/${encodePath(path)}`),
       headers: {
         ...makeHeaders(cfg.apiKey),
         Accept: 'application/vnd.olrapi.note+json',
@@ -89,7 +121,7 @@ export async function searchByTopicId(
   try {
     const res = await gmRequest({
       method: 'POST',
-      url: `${cfg.apiUrl}/search/`,
+      url: apiUrl(cfg, '/search/'),
       headers: makeHeaders(cfg.apiKey, 'application/vnd.olrapi.jsonlogic+json'),
       data: JSON.stringify({
         '==': [{ var: 'frontmatter.topic_id' }, topicId],
@@ -116,7 +148,7 @@ export async function searchOutdatedByTopicId(
   try {
     const res = await gmRequest({
       method: 'POST',
-      url: `${cfg.apiUrl}/search/`,
+      url: apiUrl(cfg, '/search/'),
       headers: makeHeaders(cfg.apiKey, 'application/vnd.olrapi.jsonlogic+json'),
       data: JSON.stringify({
         and: [
@@ -148,7 +180,7 @@ export async function searchByOrigin(
   try {
     const res = await gmRequest({
       method: 'POST',
-      url: `${cfg.apiUrl}/search/`,
+      url: apiUrl(cfg, '/search/'),
       headers: makeHeaders(cfg.apiKey, 'application/vnd.olrapi.jsonlogic+json'),
       data: JSON.stringify({
         and: [
@@ -184,7 +216,7 @@ export async function getNoteMetadata(
   try {
     const res = await gmRequest({
       method: 'GET',
-      url: `${cfg.apiUrl}/vault/${encodePath(path)}`,
+      url: apiUrl(cfg, `/vault/${encodePath(path)}`),
       headers: {
         ...makeHeaders(cfg.apiKey),
         Accept: 'application/vnd.olrapi.note+json',
@@ -216,7 +248,7 @@ export async function writeNote(
 ): Promise<void> {
   const res = await gmRequest({
     method: 'PUT',
-    url: `${cfg.apiUrl}/vault/${encodePath(path)}`,
+    url: apiUrl(cfg, `/vault/${encodePath(path)}`),
     headers: makeHeaders(cfg.apiKey),
     data: content,
   });
@@ -234,9 +266,9 @@ export async function writeBinary(
 ): Promise<void> {
   const res = await gmRequest({
     method: 'PUT',
-    url: `${cfg.apiUrl}/vault/${encodePath(path)}`,
+    url: apiUrl(cfg, `/vault/${encodePath(path)}`),
     headers: makeHeaders(cfg.apiKey, mimeType),
-    data: data.buffer as ArrayBuffer,
+    data: copyActiveBytesToArrayBuffer(data),
   });
   if (res.status !== 204 && res.status !== 200) {
     throw new Error(`Obsidian API binary write failed: HTTP ${res.status}`);
@@ -251,7 +283,7 @@ export async function appendToNote(
 ): Promise<void> {
   const res = await gmRequest({
     method: 'PATCH',
-    url: `${cfg.apiUrl}/vault/${encodePath(path)}`,
+    url: apiUrl(cfg, `/vault/${encodePath(path)}`),
     headers: {
       ...makeHeaders(cfg.apiKey),
       Operation: 'append',
@@ -268,9 +300,12 @@ export async function openNote(
   cfg: ObsidianApiConfig,
   path: string,
 ): Promise<void> {
-  await gmRequest({
+  const res = await gmRequest({
     method: 'POST',
-    url: `${cfg.apiUrl}/open/${encodePath(path)}?newLeaf=true`,
+    url: apiUrl(cfg, `/open/${encodePath(path)}?newLeaf=true`),
     headers: makeHeaders(cfg.apiKey),
   });
+  if (res.status !== 200 && res.status !== 204) {
+    throw new Error(`Obsidian API open failed: HTTP ${res.status}`);
+  }
 }

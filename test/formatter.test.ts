@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import type { ProcessedPost } from '../src/types';
+import type { DiscoursePost, PipelineContext, ProcessedPost } from '../src/types';
 import {
   buildFrontmatter,
+  processPost,
   renderTemplate,
   buildTemplateVars,
 } from '../src/core/formatter';
 import type { FrontmatterData, TemplateVars } from '../src/core/formatter';
+import { DEFAULTS } from '../src/config/defaults';
 
 function mockPost(overrides: Partial<ProcessedPost> = {}): ProcessedPost {
   return {
@@ -98,6 +100,37 @@ describe('buildFrontmatter', () => {
     };
     const result = buildFrontmatter(data);
     expect(result).toContain('title: "Title with: colon & \\"quotes\\""');
+  });
+
+  it('escapes tags and multiline scalar values', () => {
+    const data: FrontmatterData = {
+      title: 'Line 1\nLine 2',
+      source: 'https://example.com',
+      author: 'bob',
+      category: 'Test',
+      forum: 'example.com',
+      tags: ['topic:tag', ' #hash ', 'line\nbreak'],
+      created: '2026-01-01T00:00:00',
+      exported: '2026-01-01T00:00:00',
+      topic_id: 1,
+      slug: 'test',
+      posts_count: 1,
+      reply_count: 0,
+      views: 1,
+      likes: 0,
+      word_count: 100,
+      participants: 1,
+      closed: false,
+      archived: false,
+      xporter_version: 1,
+    };
+
+    const result = buildFrontmatter(data);
+
+    expect(result).toContain('title: "Line 1\\nLine 2"');
+    expect(result).toContain('  - "topic:tag"');
+    expect(result).toContain('  - " #hash "');
+    expect(result).toContain('  - "line\\nbreak"');
   });
 });
 
@@ -245,5 +278,52 @@ describe('buildTemplateVars', () => {
       12345,
     );
     expect(vars.op_badge).toBe('');
+  });
+});
+
+describe('processPost', () => {
+  it('defaults likes to zero when actions_summary is missing', () => {
+    const post = {
+      id: 1,
+      post_number: 1,
+      post_type: 1,
+      username: 'alice',
+      name: 'Alice',
+      avatar_template: '/user_avatar/example.com/alice/{size}/1.png',
+      user_id: 10,
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      cooked: '<p>Hello</p>',
+      raw: 'Hello',
+      reply_count: 0,
+      reply_to_post_number: null,
+      quote_count: 0,
+      reads: 1,
+      score: 0,
+      topic_id: 123,
+      topic_slug: 'topic',
+      display_username: 'alice',
+      version: 1,
+      trust_level: 1,
+      moderator: false,
+      admin: false,
+      staff: false,
+      hidden: false,
+      deleted_at: null,
+      wiki: false,
+      user_title: null,
+      post_url: '/t/topic/123/1',
+    } as DiscoursePost;
+    const ctx: PipelineContext = {
+      origin: 'https://example.com',
+      topicId: 123,
+      topicSlug: 'topic',
+      polls: [],
+      cookedHtml: post.cooked,
+      config: { ...DEFAULTS },
+      uploadMap: new Map(),
+    };
+
+    expect(processPost(post, 10, ctx, false).likes).toBe(0);
   });
 });

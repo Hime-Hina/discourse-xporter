@@ -5,6 +5,7 @@ import type {
   Config,
   ProgressCallback,
 } from '../types';
+import { sleepRandom } from '../utils/timing';
 
 /** Get CSRF token from Discourse meta tag */
 function getCsrfToken(): string {
@@ -31,22 +32,33 @@ export async function fetchAllPosts(
   const allPosts = [...initialPosts];
   const fetchedIds = new Set(allPosts.map((p) => p.id));
   const missingIds = stream.filter((id) => !fetchedIds.has(id));
+  const batchSize = Math.max(1, Math.floor(config.batchSize));
 
-  for (let i = 0; i < missingIds.length; i += config.batchSize) {
-    if (i > 0) await sleep(config.batchDelayMin, config.batchDelayMax);
+  for (let i = 0; i < missingIds.length; i += batchSize) {
+    if (i > 0) await sleepRandom(config.batchDelayMin, config.batchDelayMax);
 
-    const batch = missingIds.slice(i, i + config.batchSize);
+    const batch = missingIds.slice(i, i + batchSize);
     const progress = allPosts.length / stream.length;
     onProgress?.(`拉取帖子 ${allPosts.length}/${stream.length}`, progress);
 
     const qs = batch.map((id) => `post_ids[]=${id}`).join('&');
-    const res = await fetch(`/t/${topicId}/posts.json?${qs}&include_raw=true`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.post_stream?.posts) {
-        allPosts.push(...data.post_stream.posts);
-      }
+    const res = await fetchWithRetry(
+      `/t/${topicId}/posts.json?${qs}&include_raw=true`,
+    );
+    const data = await res.json();
+    const posts = data?.post_stream?.posts;
+    if (!Array.isArray(posts)) {
+      throw new Error(`Invalid posts response for topic ${topicId}`);
     }
+    allPosts.push(...posts);
+  }
+
+  const resultIds = new Set(allPosts.map((p) => p.id));
+  const stillMissing = stream.filter((id) => !resultIds.has(id));
+  if (stillMissing.length > 0) {
+    throw new Error(
+      `Failed to fetch all posts for topic ${topicId}: missing ${stillMissing.length}`,
+    );
   }
 
   allPosts.sort((a, b) => a.post_number - b.post_number);
@@ -144,7 +156,20 @@ export async function fetchBinary(
 
 // ==================== Helpers ====================
 
-function sleep(min: number, max: number): Promise<void> {
-  const ms = Math.floor(Math.random() * (max - min + 1)) + min;
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function fetchWithRetry(url: string, attempts = 2): Promise<Response> {
+  let lastStatus = 0;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const res = await fetch(url);
+    if (res.ok) return res;
+
+    lastStatus = res.status;
+    if (attempt < attempts && (res.status === 429 || res.status >= 500)) {
+      await sleepRandom(500, 1200);
+      continue;
+    }
+    throw new Error(`Failed to fetch posts: HTTP ${res.status}`);
+  }
+
+  throw new Error(`Failed to fetch posts: HTTP ${lastStatus}`);
 }

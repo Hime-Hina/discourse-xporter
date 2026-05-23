@@ -85,6 +85,14 @@ describe('transformQuotes', () => {
     expect(result).toContain('> [!quote] @inner');
     expect(result).not.toContain('[quote');
   });
+
+  it('transforms repeated identical quotes', () => {
+    const quote = '[quote="alice"]\nSame\n[/quote]';
+    const result = transformQuotes(`${quote}\n\n${quote}`, mockCtx());
+
+    expect(result.match(/> \[!quote\] @alice/g)?.length).toBe(2);
+    expect(result).not.toContain('[quote');
+  });
 });
 
 describe('transformPolls', () => {
@@ -122,6 +130,14 @@ describe('transformPolls', () => {
     expect(result).toContain('- A');
     expect(result).toContain('- B');
   });
+
+  it('transforms repeated identical polls', () => {
+    const poll = '[poll name=poll type=regular]\n* A\n* B\n[/poll]';
+    const result = transformPolls(`${poll}\n${poll}`, mockCtx());
+
+    expect(result.match(/\*\*投票\*\*/g)?.length).toBe(2);
+    expect(result).not.toContain('[poll');
+  });
 });
 
 describe('transformDates', () => {
@@ -138,6 +154,14 @@ describe('transformDates', () => {
   it('returns empty for empty input', () => {
     expect(transformDates('')).toBe('');
   });
+
+  it('transforms repeated identical dates', () => {
+    const date = '[date=2026-01-08 time=14:30:00 timezone="Asia/Shanghai"]';
+    const result = transformDates(`${date}\n${date}`);
+
+    expect(result.match(/2026-01-08 14:30 \(Asia\/Shanghai\)/g)?.length).toBe(2);
+    expect(result).not.toContain('[date=');
+  });
 });
 
 describe('transformDetails', () => {
@@ -152,6 +176,14 @@ describe('transformDetails', () => {
 
   it('returns empty for empty input', () => {
     expect(transformDetails('')).toBe('');
+  });
+
+  it('transforms repeated identical details blocks', () => {
+    const details = '[details="Click me"]\nHidden content\n[/details]';
+    const result = transformDetails(`${details}\n\n${details}`);
+
+    expect(result.match(/> \[!note\]- Click me/g)?.length).toBe(2);
+    expect(result).not.toContain('[details');
   });
 });
 

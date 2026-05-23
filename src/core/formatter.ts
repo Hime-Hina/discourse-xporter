@@ -36,8 +36,13 @@ export interface FrontmatterData {
 /** Escape a YAML string value */
 function yamlStr(str: string): string {
   if (!str) return '""';
-  if (/[:#\[\]{}&*!|>'"%@`,?]/.test(str) || str.trim() !== str) {
-    return `"${str.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  if (/[:#\[\]{}&*!|>'"%@`,?\r\n\t]/.test(str) || str.trim() !== str) {
+    return `"${str
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\t/g, '\\t')}"`;
   }
   return str;
 }
@@ -61,7 +66,7 @@ function formatDate(dateStr: string, format?: string): string {
 export function buildFrontmatter(data: FrontmatterData): string {
   const tags =
     data.tags.length > 0
-      ? '\n' + data.tags.map((t) => `  - ${t}`).join('\n')
+      ? '\n' + data.tags.map((t) => `  - ${yamlStr(t)}`).join('\n')
       : ' []';
 
   const lines = [
@@ -221,7 +226,7 @@ export function processPost(
     content = cookedToMarkdown(post.cooked);
   }
 
-  const likeAction = post.actions_summary.find((a) => a.id === 2);
+  const likeAction = post.actions_summary?.find((a) => a.id === 2);
   const likes = likeAction?.count ?? 0;
 
   return {

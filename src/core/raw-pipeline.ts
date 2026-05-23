@@ -125,7 +125,7 @@ export function transformQuotes(text: string, ctx: PipelineContext): string {
         .map((line) => `> ${line}`)
         .join('\n');
 
-      result = result.replace(fullMatch, `${header}\n${quotedContent}`);
+      result = replaceAllLiteral(result, fullMatch, `${header}\n${quotedContent}`);
     }
   }
 
@@ -158,11 +158,11 @@ export function transformPolls(text: string, ctx: PipelineContext): string {
       const statusText = jsonPoll.status === 'closed' ? '已关闭' : '进行中';
       const footer = `\n\n*投票人数: ${jsonPoll.voters} · 状态: ${statusText}*`;
 
-      result = result.replace(fullMatch, `\n\n${table}${footer}\n\n`);
+      result = replaceAllLiteral(result, fullMatch, `\n\n${table}${footer}\n\n`);
     } else {
       // No JSON data — render raw options as a list
       const list = params.options.map((opt) => `- ${opt}`).join('\n');
-      result = result.replace(fullMatch, `\n\n**投票**\n\n${list}\n\n`);
+      result = replaceAllLiteral(result, fullMatch, `\n\n**投票**\n\n${list}\n\n`);
     }
   }
 
@@ -185,7 +185,7 @@ export function transformDates(text: string): string {
     if (params.timezone) {
       formatted += ` (${params.timezone})`;
     }
-    result = result.replace(fullMatch, formatted);
+    result = replaceAllLiteral(result, fullMatch, formatted);
   }
 
   return result;
@@ -209,7 +209,7 @@ export function transformDetails(text: string): string {
         .map((line) => `> ${line}`)
         .join('\n');
 
-      result = result.replace(fullMatch, `${header}\n${quotedContent}`);
+      result = replaceAllLiteral(result, fullMatch, `${header}\n${quotedContent}`);
     }
   }
 
@@ -540,6 +540,14 @@ function transformOutsideFences(
       return inFence ? line : transformLine(line);
     })
     .join('\n');
+}
+
+function replaceAllLiteral(
+  text: string,
+  search: string,
+  replacement: string,
+): string {
+  return search ? text.split(search).join(replacement) : text;
 }
 
 // ==================== Image path rewriting ====================

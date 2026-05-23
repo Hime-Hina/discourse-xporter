@@ -1,13 +1,14 @@
-import type { Config, RangeMode, ImageMode, ImageDirMode, ImageFilter, PanelCorner } from '../types';
+import type {
+  BatchItem,
+  Config,
+  RangeMode,
+  ImageMode,
+  ImageDirMode,
+  ImageFilter,
+  PanelCorner,
+} from '../types';
 import { getConfig, saveConfig } from '../config/storage';
 import { showToast } from './toast';
-
-export interface BatchItem {
-  path: string;
-  title: string;
-  topicId: number;
-  xporterVersion: number;
-}
 
 export interface PanelCallbacks {
   onExportObsidian: () => Promise<void>;

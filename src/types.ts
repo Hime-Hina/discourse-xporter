@@ -89,7 +89,7 @@ export interface DiscoursePost {
   deleted_at: string | null;
   wiki: boolean;
   user_title: string | null;
-  actions_summary: DiscourseActionSummary[];
+  actions_summary?: DiscourseActionSummary[];
   link_counts?: DiscourseLinkCount[];
   polls?: DiscoursePoll[];
   reactions?: DiscourseReaction[];
@@ -233,3 +233,22 @@ export interface QuotePreviewInfo {
 
 /** Export progress callback */
 export type ProgressCallback = (message: string, progress?: number) => void;
+
+export interface FilterConfig {
+  rangeMode: string;
+  rangeStart: number;
+  rangeEnd: number;
+  onlyOp: boolean;
+  imgFilter: string;
+  users: string[];
+  includeKeywords: string[];
+  excludeKeywords: string[];
+  minLength: number;
+}
+
+export interface BatchItem {
+  path: string;
+  title: string;
+  topicId: number;
+  xporterVersion: number;
+}
