@@ -4,7 +4,7 @@
   "description": "Export Discourse topics to Obsidian Markdown",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 127.0.0.1 --strictPort",
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest",
