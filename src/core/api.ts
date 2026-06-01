@@ -21,6 +21,27 @@ export async function fetchTopic(topicId: number): Promise<DiscourseTopic> {
   return res.json();
 }
 
+/** Fetch one post by its stable post ID. */
+export async function fetchPostById(
+  topicId: number,
+  postId: number,
+): Promise<DiscoursePost | null> {
+  const res = await fetch(
+    `/t/${topicId}/posts.json?post_ids[]=${postId}&include_raw=true`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to fetch post ${postId}: HTTP ${res.status}`);
+  }
+
+  const postsPayload = await res.json();
+  const posts = postsPayload?.post_stream?.posts;
+  if (!Array.isArray(posts)) {
+    throw new Error(`Invalid post response for topic ${topicId}`);
+  }
+
+  return posts[0] ?? null;
+}
+
 /** Fetch missing posts in batches */
 export async function fetchAllPosts(
   topicId: number,
@@ -127,8 +148,9 @@ export async function fetchCategoryName(categoryId: number): Promise<string> {
     const res = await fetch('/site.json');
     if (res.ok) {
       const data = await res.json();
-      const cat = (data.categories as { id: number; name: string }[] | undefined)
-        ?.find((c) => c.id === categoryId);
+      const cat = (
+        data.categories as { id: number; name: string }[] | undefined
+      )?.find((c) => c.id === categoryId);
       if (cat) return cat.name;
     }
   } catch {

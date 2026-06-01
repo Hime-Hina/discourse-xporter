@@ -1,38 +1,20 @@
-import type {
-  Config,
-  DiscourseTopic,
-  BatchItem,
-  PipelineContext,
-} from './types';
+import type { BatchItem } from './types';
 import { FORMAT_VERSION } from './config/format-version';
 import { getConfig } from './config/storage';
-import { resolveUploadUrls } from './core/api';
 import { buildTopicExport } from './core/topic-export';
-import { processRaw } from './core/raw-pipeline';
-import { cookedToMarkdown } from './core/cooked-fallback';
+import { buildSinglePostMarkdown } from './core/single-post-export';
 import { copyToClipboard } from './export/clipboard';
-import { downloadFile } from './export/download';
-import {
-  testConnection,
-  searchOutdatedByTopicId,
-  searchByOrigin,
-  getNoteMetadata,
-  writeNote,
-  openNote,
-} from './export/obsidian-api';
+import { testConnection, searchOutdatedByTopicId } from './export/obsidian-api';
 import type { ObsidianApiConfig } from './export/obsidian-api';
 import {
-  buildImageZip,
-  collectImageAssets,
-  downloadImageAssets,
-  downloadZipBytes,
-  joinVaultPath,
-  resolveImgDir,
-  rewriteImageUrlsForObsidian,
-  rewriteImageUrlsForZip,
-  stripImages,
-  uploadImageAssets,
-} from './export/image-assets';
+  reExportObsidianNotes,
+  scanExportedNotesByOrigin,
+} from './export/obsidian-batch';
+import {
+  downloadTopicMarkdown,
+  downloadTopicZip,
+  writeTopicToConfiguredObsidian,
+} from './export/topic-delivery';
 import { injectStyles } from './ui/styles';
 import { showToast } from './ui/toast';
 import {
@@ -54,7 +36,6 @@ import {
   getSelectedPosts,
   clearSelectedPosts,
 } from './ui/floor-buttons';
-import { sleepRandom } from './utils/timing';
 
 export { FORMAT_VERSION };
 
@@ -90,7 +71,7 @@ function getForumName(): string {
   }
   // Fallback to the Discourse site heading / logo text
   const logoText =
-    document.querySelector('#site-text-logo')?.textContent??
+    document.querySelector('#site-text-logo')?.textContent ??
     document.querySelector('.header-title .logo-text')?.textContent;
   if (logoText?.trim()) return logoText.trim();
   // Last resort: hostname
@@ -125,26 +106,22 @@ async function doExport(mode: 'obsidian' | 'zip' | 'md'): Promise<void> {
     });
 
     if (mode === 'md') {
-      downloadFile(
-        exportData.markdown,
-        `${exportData.safeTitle}.md`,
-        'text/markdown;charset=utf-8',
-      );
+      downloadTopicMarkdown(exportData);
       showToast('Markdown 下载完成 ✓');
     } else if (mode === 'zip') {
-      await exportAsZip(
-        exportData.markdown,
-        exportData.safeTitle,
-        exportData.topicId,
+      const delivery = await downloadTopicZip(
+        exportData,
         config,
+        updateProgress,
+      );
+      showToast(
+        delivery.downloadedFileKind === 'markdown'
+          ? '无图片，已下载纯 Markdown ✓'
+          : 'ZIP 下载完成 ✓',
       );
     } else if (mode === 'obsidian') {
-      await exportToObsidian(
-        exportData.markdown,
-        exportData.safeTitle,
-        exportData.topicId,
-        config,
-      );
+      await writeTopicToConfiguredObsidian(exportData, config, updateProgress);
+      showToast('已导出到 Obsidian ✓');
     }
   } catch (err) {
     console.error('[Discourse Xporter]', err);
@@ -159,101 +136,11 @@ async function doExport(mode: 'obsidian' | 'zip' | 'md'): Promise<void> {
   }
 }
 
-async function exportAsZip(
-  markdown: string,
-  safeTitle: string,
-  topicId: number,
-  config: Config,
-): Promise<void> {
-  const imageAssets = collectImageAssets(markdown);
-
-  if (imageAssets.size === 0) {
-    downloadFile(markdown, `${safeTitle}.md`, 'text/markdown;charset=utf-8');
-    showToast('无图片，已下载纯 Markdown ✓');
-    return;
-  }
-
-  const effectiveImgDir = resolveImgDir(config);
-  const md = rewriteImageUrlsForZip(
-    markdown,
-    imageAssets,
-    effectiveImgDir,
-    topicId,
-  );
-  const images = await downloadImageAssets(imageAssets, config, updateProgress);
-
-  updateProgress('打包 ZIP…', 1);
-  const zipBytes = buildImageZip(
-    md,
-    safeTitle,
-    topicId,
-    config,
-    images,
-  );
-  downloadZipBytes(zipBytes, safeTitle);
-  showToast('ZIP 下载完成 ✓');
-}
-
-async function exportToObsidian(
-  markdown: string,
-  safeTitle: string,
-  topicId: number,
-  config: Config,
-): Promise<void> {
-  const apiCfg = { apiUrl: config.obsApiUrl, apiKey: config.obsApiKey };
-
-  if (!config.obsApiKey) {
-    showToast('请先配置 Obsidian API Key', 'error');
-    return;
-  }
-
-  // Test connection
-  updateProgress('连接 Obsidian…', 0.1);
-  const connected = await testConnection(apiCfg);
-  if (!connected) {
-    showToast('无法连接 Obsidian Local REST API', 'error', 5000);
-    return;
-  }
-
-  const notePath = joinVaultPath(config.exportDir, `${safeTitle}.md`);
-  let md = markdown;
-  const effectiveImgDir = resolveImgDir(config);
-
-  if (config.imgMode === 'file') {
-    const imageAssets = collectImageAssets(md);
-    debugLog(`[Obsidian] Found ${imageAssets.size} images to upload`);
-
-    await uploadImageAssets(
-      imageAssets,
-      apiCfg,
-      config,
-      effectiveImgDir,
-      topicId,
-      updateProgress,
-    );
-    md = rewriteImageUrlsForObsidian(md, imageAssets, effectiveImgDir, topicId);
-  } else if (config.imgMode === 'none') {
-    md = stripImages(md);
-  }
-  // imgMode === 'embed': keep standard markdown image links as-is
-
-  // Write note
-  updateProgress('写入笔记…', 0.9);
-  await writeNote(apiCfg, notePath, md);
-
-  // Open note in Obsidian
-  if (config.obsOpenAfterExport) {
-    await openNote(apiCfg, notePath);
-  }
-
-  showToast('已导出到 Obsidian ✓');
-}
-
 // ==================== Single Post Copy ====================
 
 async function handleCopyPost(
   postNumber: number,
-  _postId: number,
+  postId: number,
 ): Promise<void> {
   const topicIdentity = detectTopicIdentity();
   if (!topicIdentity) return;
@@ -262,55 +149,13 @@ async function handleCopyPost(
   const origin = window.location.origin;
 
   try {
-    // Fetch just this post's data — try from already loaded DOM first
-    // We'll fetch the topic to get the post data
-    const res = await fetch(
-      `/t/topic/${topicIdentity.topicId}.json?include_raw=true`,
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const topic: DiscourseTopic = await res.json();
-
-    let post = topic.post_stream.posts.find(
-      (p) => p.post_number === postNumber,
-    );
-
-    if (!post) {
-      // Fetch individual post by number
-      const postsRes = await fetch(
-        `/t/${topicIdentity.topicId}/posts.json?post_ids[]=${_postId}&include_raw=true`,
-      );
-      if (postsRes.ok) {
-        const data = await postsRes.json();
-        post = data?.post_stream?.posts?.[0];
-      }
-    }
-
-    if (!post) {
-      showToast('无法获取帖子数据', 'error');
-      return;
-    }
-
-    // Resolve uploads
-    const uploadUrls = post.raw?.match(/upload:\/\/[a-zA-Z0-9._-]+/g) ?? [];
-    const uploadMap = await resolveUploadUrls(uploadUrls);
-
-    const ctx: PipelineContext = {
-      origin,
+    const content = await buildSinglePostMarkdown({
       topicId: topicIdentity.topicId,
-      topicSlug: topic.slug,
-      polls: post.polls ?? [],
-      cookedHtml: post.cooked,
+      postNumber,
+      postId,
+      origin,
       config,
-      uploadMap,
-    };
-
-    let content: string;
-    if (post.raw) {
-      content = processRaw(post.raw, ctx);
-    } else {
-      content = cookedToMarkdown(post.cooked);
-    }
-
+    });
     copyToClipboard(content);
     showToast(`已复制 #${postNumber} 的 Markdown ✓`);
   } catch (err) {
@@ -327,10 +172,17 @@ async function checkOutdatedNote(topicId: number): Promise<void> {
   const config = getConfig();
   if (!config.obsApiKey) return;
 
-  const apiCfg: ObsidianApiConfig = { apiUrl: config.obsApiUrl, apiKey: config.obsApiKey };
+  const apiCfg: ObsidianApiConfig = {
+    apiUrl: config.obsApiUrl,
+    apiKey: config.obsApiKey,
+  };
 
   try {
-    const outdated = await searchOutdatedByTopicId(apiCfg, topicId, FORMAT_VERSION);
+    const outdated = await searchOutdatedByTopicId(
+      apiCfg,
+      topicId,
+      FORMAT_VERSION,
+    );
     if (outdated) {
       showToast('该话题的笔记格式已过期，建议重新导出', 'info', 8000, {
         label: '重新导出',
@@ -364,8 +216,7 @@ function activateTopicUi(topicIdentity: TopicIdentity): void {
     onExportObsidian: () => doExport('obsidian'),
     onDownloadZip: () => doExport('zip'),
     onDownloadMd: () => doExport('md'),
-    onTestConnection: (apiUrl, apiKey) =>
-      testConnection({ apiUrl, apiKey }),
+    onTestConnection: (apiUrl, apiKey) => testConnection({ apiUrl, apiKey }),
     onBatchScan: scanExportedNotes,
     onBatchReExport: doBatchReExport,
     formatVersion: FORMAT_VERSION,
@@ -377,25 +228,11 @@ function activateTopicUi(topicIdentity: TopicIdentity): void {
 
 export async function scanExportedNotes(): Promise<BatchItem[]> {
   const config = getConfig();
-  const apiCfg: ObsidianApiConfig = { apiUrl: config.obsApiUrl, apiKey: config.obsApiKey };
-  const origin = window.location.origin;
-
-  const filenames = await searchByOrigin(apiCfg, origin);
-  const items: BatchItem[] = [];
-
-  for (const filename of filenames) {
-    const meta = await getNoteMetadata(apiCfg, filename);
-    if (meta) {
-      items.push({
-        path: meta.path,
-        title: meta.title,
-        topicId: meta.topicId,
-        xporterVersion: meta.xporterVersion,
-      });
-    }
-  }
-
-  return items;
+  const apiCfg: ObsidianApiConfig = {
+    apiUrl: config.obsApiUrl,
+    apiKey: config.obsApiKey,
+  };
+  return scanExportedNotesByOrigin(apiCfg, window.location.origin);
 }
 
 export async function doBatchReExport(
@@ -403,75 +240,19 @@ export async function doBatchReExport(
   onProgress: (current: number, total: number, title: string) => void,
 ): Promise<{ success: number; failed: number }> {
   const config = getConfig();
-  const apiCfg: ObsidianApiConfig = { apiUrl: config.obsApiUrl, apiKey: config.obsApiKey };
-  const origin = window.location.origin;
-  let success = 0;
-  let failed = 0;
-
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    onProgress(i + 1, items.length, item.title);
-
-    if (i > 0) {
-      await sleepRandom(config.batchDelayMin, config.batchDelayMax);
-    }
-
-    try {
-      await reExportSingleTopic(item, config, apiCfg, origin);
-      success++;
-    } catch (err) {
-      console.warn(`[DXP] Batch re-export failed for topic ${item.topicId}:`, err);
-      // Retry once on 429
-      if (err instanceof Error && err.message.includes('429')) {
-        await sleepRandom(config.batchDelayMax * 2, config.batchDelayMax * 2);
-        try {
-          await reExportSingleTopic(item, config, apiCfg, origin);
-          success++;
-          continue;
-        } catch {
-          // give up
-        }
-      }
-      failed++;
-    }
-  }
-
-  return { success, failed };
-}
-
-async function reExportSingleTopic(
-  item: BatchItem,
-  config: Config,
-  apiCfg: ObsidianApiConfig,
-  origin: string,
-): Promise<void> {
-  const exportData = await buildTopicExport({
-    topicId: item.topicId,
-    origin,
+  const apiCfg: ObsidianApiConfig = {
+    apiUrl: config.obsApiUrl,
+    apiKey: config.obsApiKey,
+  };
+  return reExportObsidianNotes({
+    items,
+    config,
+    apiConfig: apiCfg,
+    origin: window.location.origin,
     forumName: getForumName(),
     formatVersion: FORMAT_VERSION,
-    config,
+    onProgress,
   });
-
-  let md = exportData.markdown;
-  const effectiveImgDir = resolveImgDir(config);
-
-  if (config.imgMode === 'file') {
-    const imageAssets = collectImageAssets(md);
-    await uploadImageAssets(
-      imageAssets,
-      apiCfg,
-      config,
-      effectiveImgDir,
-      item.topicId,
-    );
-    md = rewriteImageUrlsForObsidian(md, imageAssets, effectiveImgDir, item.topicId);
-  } else if (config.imgMode === 'none') {
-    md = stripImages(md);
-  }
-
-  const notePath = item.path || joinVaultPath(config.exportDir, `${exportData.safeTitle}.md`);
-  await writeNote(apiCfg, notePath, md);
 }
 
 function init(): void {
