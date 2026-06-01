@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { openNote, testConnection, writeBinary } from '../src/export/obsidian-api';
+import {
+  openNote,
+  searchByOrigin,
+  searchOutdatedByTopicId,
+  testConnection,
+  writeBinary,
+} from '../src/export/obsidian-api';
 
 interface GmRequestDetails {
   method: string;
@@ -10,11 +16,11 @@ interface GmRequestDetails {
   onerror: (error: unknown) => void;
 }
 
-function mockGm(status = 204): GmRequestDetails[] {
+function mockGm(status = 204, responseText = ''): GmRequestDetails[] {
   const requests: GmRequestDetails[] = [];
   vi.stubGlobal('GM_xmlhttpRequest', (details: GmRequestDetails) => {
     requests.push(details);
-    details.onload({ status, responseText: '' });
+    details.onload({ status, responseText });
   });
   return requests;
 }
@@ -59,5 +65,32 @@ describe('obsidian api', () => {
       testConnection({ apiUrl: 'https://example.com:27124', apiKey: 'secret' }),
     ).resolves.toBe(false);
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('queries outdated notes with the current format version', async () => {
+    const requests = mockGm(200, JSON.stringify([{ filename: 'topic.md' }]));
+
+    await expect(
+      searchOutdatedByTopicId(
+        { apiUrl: 'https://127.0.0.1:27124', apiKey: 'key' },
+        123,
+        2,
+      ),
+    ).resolves.toBe(true);
+
+    const query = String(requests[0].data);
+    expect(query).toContain('"frontmatter.xporter_version"');
+    expect(query).toContain(',2]');
+  });
+
+  it('surfaces user-triggered search failures', async () => {
+    mockGm(500);
+
+    await expect(
+      searchByOrigin(
+        { apiUrl: 'https://127.0.0.1:27124', apiKey: 'key' },
+        'https://example.com',
+      ),
+    ).rejects.toThrow('HTTP 500');
   });
 });

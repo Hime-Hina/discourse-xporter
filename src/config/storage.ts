@@ -8,8 +8,14 @@ declare function GM_setValue(key: string, value: unknown): void;
 
 /** Read config, merging stored values over defaults */
 export function getConfig(): Config {
-  const stored = GM_getValue<Partial<Config>>(STORAGE_KEY, {});
-  return { ...DEFAULTS, ...stored };
+  const stored = GM_getValue<Record<string, unknown>>(STORAGE_KEY, {});
+  const config = { ...DEFAULTS };
+  for (const key of Object.keys(DEFAULTS) as (keyof Config)[]) {
+    if (Object.prototype.hasOwnProperty.call(stored, key)) {
+      (config as Record<keyof Config, unknown>)[key] = stored[key];
+    }
+  }
+  return config;
 }
 
 /** Save only fields that differ from defaults */

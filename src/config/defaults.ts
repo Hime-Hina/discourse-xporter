@@ -2,7 +2,7 @@ import type { Config } from '../types';
 
 export const DEFAULT_FLOOR_TEMPLATE = `---
 
-## #{{post_number}} · {{author_full}} · {{date}}{{reply_to_display}}{{op_badge_display}}{{likes_display}}{{highlight}} {{block_ref}}
+## #{{post_number}} · {{author_full}} · {{date}}{{reply_to_display}}{{op_badge_display}}{{solution_badge_display}}{{likes_display}}{{highlight}} {{block_ref}}
 
 {{content}}
 `;
@@ -17,16 +17,10 @@ export const DEFAULTS: Config = {
   // Obsidian API
   obsApiUrl: 'https://127.0.0.1:27124',
   obsApiKey: '',
-  obsWriteMode: 'overwrite',
   obsOpenAfterExport: true,
 
   // Floor template
   floorTemplate: DEFAULT_FLOOR_TEMPLATE,
-  dateFormat: 'YYYY-MM-DD HH:mm',
-
-  // Filter defaults
-  defaultOnlyOp: false,
-  defaultImgFilter: 'none',
 
   // Request
   batchSize: 100,

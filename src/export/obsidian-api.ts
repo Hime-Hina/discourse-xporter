@@ -177,28 +177,34 @@ export async function searchByOrigin(
   cfg: ObsidianApiConfig,
   origin: string,
 ): Promise<string[]> {
-  try {
-    const res = await gmRequest({
-      method: 'POST',
-      url: apiUrl(cfg, '/search/'),
-      headers: makeHeaders(cfg.apiKey, 'application/vnd.olrapi.jsonlogic+json'),
-      data: JSON.stringify({
-        and: [
-          { glob: [`${origin}/*`, { var: 'frontmatter.source' }] },
-          { '!!': [{ var: 'frontmatter.topic_id' }] },
-        ],
-      }),
-    });
-    if (res.status === 200) {
-      const results = JSON.parse(res.responseText);
-      if (Array.isArray(results)) {
-        return results.map((r: { filename: string }) => r.filename);
-      }
-    }
-  } catch {
-    // ignore
+  const res = await gmRequest({
+    method: 'POST',
+    url: apiUrl(cfg, '/search/'),
+    headers: makeHeaders(cfg.apiKey, 'application/vnd.olrapi.jsonlogic+json'),
+    data: JSON.stringify({
+      and: [
+        { glob: [`${origin}/*`, { var: 'frontmatter.source' }] },
+        { '!!': [{ var: 'frontmatter.topic_id' }] },
+      ],
+    }),
+  });
+
+  if (res.status !== 200) {
+    throw new Error(`Obsidian API search failed: HTTP ${res.status}`);
   }
-  return [];
+
+  const results: unknown = JSON.parse(res.responseText);
+  if (!Array.isArray(results)) {
+    throw new Error('Obsidian API search returned invalid results');
+  }
+
+  return results
+    .map((entry: unknown) =>
+      typeof entry === 'object' && entry !== null && 'filename' in entry
+        ? (entry as { filename?: unknown }).filename
+        : null,
+    )
+    .filter((filename): filename is string => typeof filename === 'string');
 }
 
 export interface NoteMetadata {
@@ -272,26 +278,6 @@ export async function writeBinary(
   });
   if (res.status !== 204 && res.status !== 200) {
     throw new Error(`Obsidian API binary write failed: HTTP ${res.status}`);
-  }
-}
-
-/** Append content to existing note via PATCH */
-export async function appendToNote(
-  cfg: ObsidianApiConfig,
-  path: string,
-  content: string,
-): Promise<void> {
-  const res = await gmRequest({
-    method: 'PATCH',
-    url: apiUrl(cfg, `/vault/${encodePath(path)}`),
-    headers: {
-      ...makeHeaders(cfg.apiKey),
-      Operation: 'append',
-    },
-    data: content,
-  });
-  if (res.status !== 200) {
-    throw new Error(`Obsidian API append failed: HTTP ${res.status}`);
   }
 }
 

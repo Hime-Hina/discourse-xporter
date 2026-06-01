@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import type { PipelineContext } from '../src/types';
 import { DEFAULTS } from '../src/config/defaults';
@@ -185,6 +186,16 @@ describe('transformDetails', () => {
     expect(result.match(/> \[!note\]- Click me/g)?.length).toBe(2);
     expect(result).not.toContain('[details');
   });
+
+  it('transforms raw HTML details summary blocks', () => {
+    const raw =
+      '<details><summary>Click me</summary><p>Hidden <strong>content</strong></p></details>';
+    const result = transformDetails(raw);
+
+    expect(result).toContain('> [!note]- Click me');
+    expect(result).toContain('> Hidden **content**');
+    expect(result).not.toContain('<summary>');
+  });
 });
 
 describe('transformQuotes — block ref for same topic', () => {
@@ -237,6 +248,41 @@ describe('processRaw spacing', () => {
     const raw = '![image](https://example.com/image.png)\ntext';
     const result = processRaw(raw, mockCtx());
     expect(result).toBe('![image](https://example.com/image.png)\n\ntext');
+  });
+});
+
+describe('processRaw oneboxes', () => {
+  it('replaces raw site-relative topic links with cooked inline onebox titles', () => {
+    const result = processRaw(
+      '/t/linked-topic/456',
+      mockCtx({
+        cookedHtml:
+          '<p><a class="inline-onebox" href="/t/linked-topic/456">Linked topic title</a></p>',
+      }),
+    );
+
+    expect(result).toBe('[Linked topic title](https://example.com/t/linked-topic/456)');
+  });
+
+  it('replaces raw site-relative topic links with cooked quote previews', () => {
+    const result = processRaw(
+      '/t/other-topic/456/7',
+      mockCtx({
+        cookedHtml: `
+          <aside class="quote quote-modified" data-post="7" data-topic="456">
+            <div class="title">
+              <img alt="bob" class="avatar" src="/user_avatar/example/bob/48/1.png">
+              <a href="/t/other-topic/456/7">Other topic title</a>
+            </div>
+            <blockquote><p>Quoted body</p></blockquote>
+          </aside>
+        `,
+      }),
+    );
+
+    expect(result).toContain('> [!quote] Other topic title');
+    expect(result).toContain('[#7](https://example.com/t/topic/456/7)');
+    expect(result).toContain('> Quoted body');
   });
 });
 

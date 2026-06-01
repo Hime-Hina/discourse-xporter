@@ -122,6 +122,8 @@ export interface TemplateVars {
   is_wiki: boolean;
   content: string;
   highlight: string;
+  solution_badge: string;
+  solution_badge_display: string;
   block_ref: string;
 }
 
@@ -153,6 +155,8 @@ export function buildTemplateVars(
     .join(' · ');
 
   const highlight = post.selected ? ' · ==已选中==' : '';
+  const solutionBadge = post.is_solution ? '✅ 解决方案' : '';
+  const solutionBadgeDisplay = post.is_solution ? ' · ✅ 解决方案' : '';
   // Always add block ref so reply links work via [[#^floor-N]]
   const blockRef = `^floor-${post.post_number}`;
 
@@ -182,6 +186,8 @@ export function buildTemplateVars(
     is_wiki: post.is_wiki,
     content: post.content,
     highlight,
+    solution_badge: solutionBadge,
+    solution_badge_display: solutionBadgeDisplay,
     block_ref: blockRef,
   };
 }
@@ -245,6 +251,8 @@ export function processPost(
     post_url: topicUrl(ctx.origin, ctx.topicId, post.post_number),
     content,
     selected,
+    is_solution:
+      post.accepted_answer === true || post.topic_accepted_answer === true,
   };
 }
 
@@ -257,6 +265,7 @@ export function assembleDocument(
   template: string,
   origin: string,
   topicId: number,
+  acceptedAnswerPostNumber?: number,
 ): string {
   const parts: string[] = [frontmatter, '\n\n'];
 
@@ -264,6 +273,11 @@ export function assembleDocument(
     const vars = buildTemplateVars(post, origin, topicId);
     const rendered = renderTemplate(template, vars);
     parts.push(rendered);
+    if (post.post_number === 1 && acceptedAnswerPostNumber !== undefined) {
+      parts.push(
+        `\n> [!success] 解决方案：[[#^floor-${acceptedAnswerPostNumber}|#${acceptedAnswerPostNumber}]]\n`,
+      );
+    }
     parts.push('\n');
   }
 

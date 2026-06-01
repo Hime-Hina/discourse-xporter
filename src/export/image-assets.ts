@@ -4,7 +4,10 @@ import { writeBinary, type ObsidianApiConfig } from './obsidian-api';
 import { buildZip } from './zip-export';
 import { downloadFile } from './download';
 import { safeFilename } from '../utils/filename';
-import { escapeObsidianAlias, unescapeMarkdownLabel } from '../utils/obsidian';
+import {
+  markdownLabelToObsidianAlias,
+  unescapeMarkdownLabel,
+} from '../utils/obsidian';
 import { isAvatarUrl, isEmojiUrl } from '../utils/url';
 import { sleepRandom } from '../utils/timing';
 import { copyActiveBytesToArrayBuffer } from '../utils/binary';
@@ -87,7 +90,7 @@ export function rewriteImageUrlsForObsidian(
       if (!asset) return match;
 
       const path = joinVaultPath(basePath, asset.filename);
-      const alias = escapeObsidianAlias(unescapeMarkdownLabel(alt));
+      const alias = markdownLabelToObsidianAlias(alt);
       return alias ? `![[${path}|${alias}]]` : `![[${path}]]`;
     },
   );
@@ -117,8 +120,10 @@ export async function downloadImageAssets(
       chunk.map(async (asset) => {
         try {
           images.set(asset.filename, await fetchBinary(asset.url));
-        } catch {
-          console.warn(`[DXP] Image download failed: ${asset.url}`);
+        } catch (error) {
+          throw new Error(
+            `Image download failed for ${asset.url}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         } finally {
           completed++;
           onProgress?.(
@@ -143,22 +148,36 @@ export async function uploadImageAssets(
 ): Promise<void> {
   const entries = [...assets.values()];
   const basePath = joinVaultPath(imgDir, String(topicId));
+  const concurrency = Math.max(1, Math.floor(config.imageConcurrency));
+  let completed = 0;
 
-  for (let i = 0; i < entries.length; i++) {
-    const asset = entries[i];
-    onProgress?.(`上传图片 ${i + 1}/${entries.length}`, (i + 1) / entries.length);
+  for (let i = 0; i < entries.length; i += concurrency) {
+    if (i > 0) await sleepRandom(config.imageDelayMin, config.imageDelayMax);
 
-    try {
-      const binary = await fetchBinary(asset.url);
-      await writeBinary(
-        apiCfg,
-        joinVaultPath(basePath, asset.filename),
-        binary,
-        guessMime(asset.filename),
-      );
-    } catch {
-      console.warn(`[DXP] Image upload failed: ${asset.url}`);
-    }
+    const chunk = entries.slice(i, i + concurrency);
+    await Promise.all(
+      chunk.map(async (asset) => {
+        try {
+          const binary = await fetchBinary(asset.url);
+          await writeBinary(
+            apiCfg,
+            joinVaultPath(basePath, asset.filename),
+            binary,
+            guessMime(asset.filename),
+          );
+        } catch (error) {
+          throw new Error(
+            `Image upload failed for ${asset.url}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        } finally {
+          completed++;
+          onProgress?.(
+            `上传图片 ${completed}/${entries.length}`,
+            completed / entries.length,
+          );
+        }
+      }),
+    );
   }
 }
 

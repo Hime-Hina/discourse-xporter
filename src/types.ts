@@ -31,6 +31,17 @@ export interface DiscourseTopic {
     last_poster: DiscourseUser;
     links?: DiscourseTopicLink[];
   };
+  accepted_answer?: DiscourseAcceptedAnswer | null;
+}
+
+export interface DiscourseAcceptedAnswer {
+  post_number: number;
+  username: string;
+  name?: string | null;
+  avatar_template?: string | null;
+  excerpt?: string | null;
+  accepter_name?: string | null;
+  accepter_username?: string | null;
 }
 
 export interface DiscourseTag {
@@ -94,6 +105,8 @@ export interface DiscoursePost {
   polls?: DiscoursePoll[];
   reactions?: DiscourseReaction[];
   post_url: string;
+  accepted_answer?: boolean;
+  topic_accepted_answer?: boolean;
 }
 
 export interface DiscourseActionSummary {
@@ -143,7 +156,6 @@ export interface UploadLookupResult {
 
 export type ImageMode = 'file' | 'embed' | 'none';
 export type ImageDirMode = 'relative' | 'absolute';
-export type WriteMode = 'overwrite' | 'append';
 export type ImageFilter = 'none' | 'withImg' | 'noImg';
 export type RangeMode = 'all' | 'range' | 'selected';
 export type PanelCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
@@ -158,16 +170,10 @@ export interface Config {
   // Obsidian API
   obsApiUrl: string;
   obsApiKey: string;
-  obsWriteMode: WriteMode;
   obsOpenAfterExport: boolean;
 
   // Floor template
   floorTemplate: string;
-  dateFormat: string;
-
-  // Filter defaults
-  defaultOnlyOp: boolean;
-  defaultImgFilter: ImageFilter;
 
   // Request
   batchSize: number;
@@ -201,6 +207,7 @@ export interface ProcessedPost {
   post_url: string;
   content: string;
   selected: boolean;
+  is_solution: boolean;
 }
 
 /** Context passed to the raw pipeline */
@@ -235,11 +242,11 @@ export interface QuotePreviewInfo {
 export type ProgressCallback = (message: string, progress?: number) => void;
 
 export interface FilterConfig {
-  rangeMode: string;
+  rangeMode: RangeMode;
   rangeStart: number;
   rangeEnd: number;
   onlyOp: boolean;
-  imgFilter: string;
+  imgFilter: ImageFilter;
   users: string[];
   includeKeywords: string[];
   excludeKeywords: string[];

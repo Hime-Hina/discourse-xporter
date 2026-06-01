@@ -14,6 +14,7 @@ export interface PanelCallbacks {
   onExportObsidian: () => Promise<void>;
   onDownloadZip: () => Promise<void>;
   onDownloadMd: () => Promise<void>;
+  onTestConnection: (apiUrl: string, apiKey: string) => Promise<boolean>;
   onBatchScan: () => Promise<BatchItem[]>;
   onBatchReExport: (
     items: BatchItem[],
@@ -253,15 +254,16 @@ function buildPanel(cfg: Config): HTMLElement {
     [],
   );
   btnTest.addEventListener('click', async () => {
+    if (!callbacks) return;
+
     btnTest.textContent = '⏳ 连接中…';
     sslHint.style.display = 'none';
     try {
-      const res = await fetch(inApiUrl.value.trim() + '/', {
-        headers: inApiKey.value
-          ? { Authorization: 'Bearer ' + inApiKey.value }
-          : {},
-      });
-      btnTest.textContent = res.ok ? '✅ 连接成功' : `❌ ${res.status}`;
+      const connected = await callbacks.onTestConnection(
+        inApiUrl.value.trim(),
+        inApiKey.value,
+      );
+      btnTest.textContent = connected ? '✅ 连接成功' : '❌ 连接失败';
     } catch {
       btnTest.textContent = '❌ 连接失败';
       const url = inApiUrl.value.trim();

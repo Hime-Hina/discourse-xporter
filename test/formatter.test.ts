@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { DiscoursePost, PipelineContext, ProcessedPost } from '../src/types';
 import {
+  assembleDocument,
   buildFrontmatter,
   processPost,
   renderTemplate,
@@ -8,6 +9,7 @@ import {
 } from '../src/core/formatter';
 import type { FrontmatterData, TemplateVars } from '../src/core/formatter';
 import { DEFAULTS } from '../src/config/defaults';
+import { FORMAT_VERSION } from '../src/config/format-version';
 
 function mockPost(overrides: Partial<ProcessedPost> = {}): ProcessedPost {
   return {
@@ -26,6 +28,7 @@ function mockPost(overrides: Partial<ProcessedPost> = {}): ProcessedPost {
     post_url: 'https://example.com/t/test-topic/12345/1',
     content: 'Hello world',
     selected: false,
+    is_solution: false,
     ...overrides,
   };
 }
@@ -51,11 +54,11 @@ describe('buildFrontmatter', () => {
       participants: 5,
       closed: false,
       archived: false,
-      xporter_version: 1,
+      xporter_version: FORMAT_VERSION,
     };
     const result = buildFrontmatter(data);
     expect(result).toContain('---');
-    expect(result).toContain('xporter_version: 1');
+    expect(result).toContain(`xporter_version: ${FORMAT_VERSION}`);
     expect(result).toContain('title: Test Topic');
     expect(result).toContain('source: "https://example.com/t/test-topic/123"');
     expect(result).toContain('author: alice');
@@ -160,6 +163,8 @@ describe('renderTemplate', () => {
       is_wiki: false,
       content: 'Hello world',
       highlight: '',
+      solution_badge: '',
+      solution_badge_display: '',
       block_ref: '',
     };
     const result = renderTemplate(template, vars);
@@ -191,6 +196,8 @@ describe('renderTemplate', () => {
       is_wiki: false,
       content: '',
       highlight: '',
+      solution_badge: '',
+      solution_badge_display: '',
       block_ref: '',
     };
     const result = renderTemplate(template, vars);
@@ -223,6 +230,8 @@ describe('renderTemplate', () => {
       is_wiki: false,
       content: 'Terminal prompt is `~ $` and `root@host:~#`',
       highlight: '',
+      solution_badge: '',
+      solution_badge_display: '',
       block_ref: '',
     };
     const result = renderTemplate(template, vars);
@@ -279,6 +288,17 @@ describe('buildTemplateVars', () => {
     );
     expect(vars.op_badge).toBe('');
   });
+
+  it('sets solution badge for accepted answer posts', () => {
+    const vars = buildTemplateVars(
+      mockPost({ is_solution: true }),
+      'https://example.com',
+      12345,
+    );
+
+    expect(vars.solution_badge).toBe('✅ 解决方案');
+    expect(vars.solution_badge_display).toContain('解决方案');
+  });
 });
 
 describe('processPost', () => {
@@ -325,5 +345,29 @@ describe('processPost', () => {
     };
 
     expect(processPost(post, 10, ctx, false).likes).toBe(0);
+  });
+});
+
+describe('assembleDocument solved metadata', () => {
+  it('adds a first-floor solution link without duplicating accepted answer body', () => {
+    const document = assembleDocument(
+      '---\ntopic_id: 123\n---',
+      [
+        mockPost({ post_number: 1, content: 'Question' }),
+        mockPost({
+          post_number: 3,
+          content: 'Accepted answer body',
+          is_solution: true,
+        }),
+      ],
+      '## #{{post_number}}{{solution_badge_display}} {{block_ref}}\n\n{{content}}\n',
+      'https://example.com',
+      123,
+      3,
+    );
+
+    expect(document).toContain('解决方案：[[#^floor-3|#3]]');
+    expect(document).toContain('## #3 · ✅ 解决方案 ^floor-3');
+    expect(document.match(/Accepted answer body/g)?.length).toBe(1);
   });
 });

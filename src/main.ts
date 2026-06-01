@@ -4,6 +4,7 @@ import type {
   BatchItem,
   PipelineContext,
 } from './types';
+import { FORMAT_VERSION } from './config/format-version';
 import { getConfig } from './config/storage';
 import { resolveUploadUrls } from './core/api';
 import { buildTopicExport } from './core/topic-export';
@@ -49,8 +50,7 @@ import {
 } from './ui/floor-buttons';
 import { sleepRandom } from './utils/timing';
 
-/** Format version — increment only on incompatible output format changes */
-export const FORMAT_VERSION = 1;
+export { FORMAT_VERSION };
 
 declare function GM_registerMenuCommand(
   caption: string,
@@ -501,6 +501,8 @@ function init(): void {
     onExportObsidian: () => doExport('obsidian'),
     onDownloadZip: () => doExport('zip'),
     onDownloadMd: () => doExport('md'),
+    onTestConnection: (apiUrl, apiKey) =>
+      testConnection({ apiUrl, apiKey }),
     onBatchScan: scanExportedNotes,
     onBatchReExport: doBatchReExport,
     formatVersion: FORMAT_VERSION,

@@ -1,11 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   collectImageAssets,
+  downloadImageAssets,
   joinVaultPath,
   normalizeVaultPath,
   rewriteImageUrlsForObsidian,
   rewriteImageUrlsForZip,
+  uploadImageAssets,
 } from '../src/export/image-assets';
+import { DEFAULTS } from '../src/config/defaults';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('image assets', () => {
   it('deduplicates filenames for different URLs with the same basename', () => {
@@ -36,6 +43,57 @@ describe('image assets', () => {
     expect(
       rewriteImageUrlsForObsidian(markdown, assets, 'attachments', 123),
     ).toBe('![[attachments/123/image.png|a&#124;b]]');
+  });
+
+  it('normalizes Markdown-escaped image labels before Obsidian alias escaping', () => {
+    const markdown = String.raw`![【官方订阅gpt pro20x】\|低价 \(教程\)](https://cdn.example.com/a/image.png)`;
+    const assets = collectImageAssets(markdown);
+
+    expect(
+      rewriteImageUrlsForObsidian(markdown, assets, 'attachments', 123),
+    ).toBe(
+      String.raw`![[attachments/123/image.png|【官方订阅gpt pro20x】&#124;低价 (教程)]]`,
+    );
+  });
+
+  it('fails image downloads instead of returning a partial asset map', async () => {
+    const markdown = '![image](https://cdn.example.com/a/image.png)';
+    const assets = collectImageAssets(markdown);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false, status: 404 }) as Response),
+    );
+
+    await expect(
+      downloadImageAssets(assets, { ...DEFAULTS, imageConcurrency: 1 }),
+    ).rejects.toThrow('Image download failed');
+  });
+
+  it('fails image uploads when the vault write fails', async () => {
+    const markdown = '![image](https://cdn.example.com/a/image.png)';
+    const assets = collectImageAssets(markdown);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      }) as Response),
+    );
+    vi.stubGlobal('GM_xmlhttpRequest', (request: {
+      onload: (response: { status: number; responseText: string }) => void;
+    }) => {
+      request.onload({ status: 500, responseText: '' });
+    });
+
+    await expect(
+      uploadImageAssets(
+        assets,
+        { apiUrl: 'https://127.0.0.1:27124', apiKey: 'key' },
+        { ...DEFAULTS, imageConcurrency: 1 },
+        'attachments',
+        123,
+      ),
+    ).rejects.toThrow('Image upload failed');
   });
 
   it('normalizes vault paths and removes dangerous segments', () => {

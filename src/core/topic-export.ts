@@ -63,6 +63,10 @@ export async function buildTopicExport(
   const posts = options.filters
     ? applyFilters(allPosts, topic, options.filters, options.selectedPosts)
     : allPosts;
+  const acceptedAnswerPostNumber = resolveAcceptedAnswerPostNumber(
+    topic,
+    allPosts,
+  );
 
   onProgress?.('处理内容…', 0.6);
   const processedPosts = posts.map((post) => {
@@ -75,8 +79,12 @@ export async function buildTopicExport(
       config,
       uploadMap,
     };
+    const postForProcessing =
+      post.post_number === acceptedAnswerPostNumber
+        ? { ...post, accepted_answer: true }
+        : post;
     return processPost(
-      post,
+      postForProcessing,
       topic.user_id,
       ctx,
       options.selectedPosts?.has(post.post_number) ?? false,
@@ -119,10 +127,23 @@ export async function buildTopicExport(
       template,
       options.origin,
       topicId,
+      acceptedAnswerPostNumber,
     ),
     safeTitle: safeFilename(topic.title) || `topic-${topicId}`,
     topicId,
   };
+}
+
+function resolveAcceptedAnswerPostNumber(
+  topic: DiscourseTopic,
+  posts: DiscoursePost[],
+): number | undefined {
+  const topicAcceptedAnswerPostNumber = topic.accepted_answer?.post_number;
+  if (typeof topicAcceptedAnswerPostNumber === 'number') {
+    return topicAcceptedAnswerPostNumber;
+  }
+
+  return posts.find((post) => post.accepted_answer)?.post_number;
 }
 
 function collectUploadUrls(posts: DiscoursePost[]): string[] {

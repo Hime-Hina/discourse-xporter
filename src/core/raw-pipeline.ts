@@ -8,7 +8,7 @@ import {
 import { replaceEmoji } from './emoji-map';
 import { cookedToMarkdown } from './cooked-fallback';
 import { resolveUrl, topicUrl } from '../utils/url';
-import { escapeObsidianAlias, unescapeMarkdownLabel } from '../utils/obsidian';
+import { markdownLabelToObsidianAlias } from '../utils/obsidian';
 
 /**
  * Process raw Markdown through the full transformation pipeline.
@@ -213,7 +213,29 @@ export function transformDetails(text: string): string {
     }
   }
 
-  return result;
+  return transformHtmlDetails(result);
+}
+
+export function transformHtmlDetails(text: string): string {
+  return text.replace(
+    /<details>\s*<summary>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi,
+    (_fullMatch: string, summaryHtml: string, bodyHtml: string) => {
+      const title = htmlFragmentToMarkdown(summaryHtml)
+        .replace(/\s+/g, ' ')
+        .trim();
+      const body = htmlFragmentToMarkdown(bodyHtml).trim();
+      const quotedBody = body
+        .split('\n')
+        .map((line) => `> ${line}`)
+        .join('\n');
+      return `> [!note]- ${title}\n${quotedBody}`;
+    },
+  );
+}
+
+function htmlFragmentToMarkdown(fragment: string): string {
+  if (!/<[a-z][\s\S]*>/i.test(fragment)) return fragment.trim();
+  return cookedToMarkdown(fragment).trim();
 }
 
 // ==================== Step 8: Onebox ====================
@@ -243,7 +265,7 @@ export function extractOneboxes(cookedHtml: string): Map<string, OneboxInfo> {
       const headerLink = aside.querySelector(
         'header a[href]',
       ) as HTMLAnchorElement | null;
-      url = headerLink?.href ?? '';
+      url = headerLink?.getAttribute('href') ?? '';
     }
     if (!url) continue;
 
@@ -274,7 +296,7 @@ export function extractOneboxes(cookedHtml: string): Map<string, OneboxInfo> {
   // 2. Inline onebox: a.inline-onebox → titled link
   const inlineOneboxes = doc.querySelectorAll('a.inline-onebox');
   for (const a of inlineOneboxes) {
-    const url = (a as HTMLAnchorElement).href;
+    const url = a.getAttribute('href') ?? '';
     const title = a.textContent?.trim();
     if (url && title && !map.has(url)) {
       map.set(url, { url, rendered: `[${title}](${url})` });
@@ -302,15 +324,16 @@ export function transformOneboxes(text: string, ctx: PipelineContext): string {
 
   // Build a normalized URL → OneboxInfo lookup
   const normalizedMap = new Map<string, OneboxInfo>();
-  for (const [url, info] of oneboxMap) {
-    normalizedMap.set(normalizeUrlForMatch(url), info);
+  for (const [url, onebox] of oneboxMap) {
+    normalizedMap.set(normalizeUrlForMatch(resolveUrl(url, ctx.origin)), onebox);
   }
 
   // Replace bare URLs that appear on their own line
-  return text.replace(/^(https?:\/\/\S+)$/gm, (match, rawUrl: string) => {
-    const info = normalizedMap.get(normalizeUrlForMatch(rawUrl));
-    if (!info) return match;
-    return info.rendered;
+  return replaceBareDiscourseLinks(text, ctx.origin, (rawUrl) => {
+    const onebox = normalizedMap.get(
+      normalizeUrlForMatch(resolveUrl(rawUrl, ctx.origin)),
+    );
+    return onebox?.rendered;
   });
 }
 
@@ -344,7 +367,7 @@ export function extractQuotePreviews(
       'a[href]',
     ) as HTMLAnchorElement | null;
     const titleText = titleLink?.textContent?.trim() ?? '';
-    const url = titleLink?.href ?? '';
+    const url = titleLink?.getAttribute('href') ?? '';
 
     // Extract avatar info
     const avatarImg = titleDiv?.querySelector(
@@ -383,35 +406,37 @@ export function transformQuotePreviews(
 
   // Build a normalized lookup
   const normalizedMap = new Map<string, QuotePreviewInfo>();
-  for (const [url, info] of previewMap) {
-    normalizedMap.set(normalizeUrlForMatch(resolveUrl(url, ctx.origin)), info);
+  for (const [url, preview] of previewMap) {
+    normalizedMap.set(normalizeUrlForMatch(resolveUrl(url, ctx.origin)), preview);
   }
 
   // Replace bare URLs that match quote previews
-  return text.replace(/^(https?:\/\/\S+)$/gm, (match, rawUrl: string) => {
-    const info = normalizedMap.get(normalizeUrlForMatch(rawUrl));
-    if (!info) return match;
+  return replaceBareDiscourseLinks(text, ctx.origin, (rawUrl) => {
+    const preview = normalizedMap.get(
+      normalizeUrlForMatch(resolveUrl(rawUrl, ctx.origin)),
+    );
+    if (!preview) return undefined;
 
     // Build callout header
     let header = '> [!quote]';
-    if (info.title) {
-      header += ` ${info.title}`;
+    if (preview.title) {
+      header += ` ${preview.title}`;
     }
 
     // Build floor reference
     let floorRef: string;
-    if (info.topicId === ctx.topicId) {
-      floorRef = `[[#^floor-${info.postNumber}|#${info.postNumber}]]`;
+    if (preview.topicId === ctx.topicId) {
+      floorRef = `[[#^floor-${preview.postNumber}|#${preview.postNumber}]]`;
     } else {
-      const url = topicUrl(ctx.origin, info.topicId, info.postNumber);
-      floorRef = `[#${info.postNumber}](${url})`;
+      const url = topicUrl(ctx.origin, preview.topicId, preview.postNumber);
+      floorRef = `[#${preview.postNumber}](${url})`;
     }
     header += ` · ${floorRef}`;
 
     // Build quoted body
-    const quotedBody = info.body
+    const quotedBody = preview.body
       ? '\n' +
-        info.body
+        preview.body
           .split('\n')
           .map((line: string) => `> ${line}`)
           .join('\n')
@@ -419,6 +444,20 @@ export function transformQuotePreviews(
 
     return `${header}${quotedBody}`;
   });
+}
+
+function replaceBareDiscourseLinks(
+  text: string,
+  origin: string,
+  replacementForUrl: (url: string) => string | undefined,
+): string {
+  return text.replace(
+    /^((?:https?:\/\/|\/(?:t|u|c|tags|categories|uploads|images)\/)\S+)$/gm,
+    (match: string, rawUrl: string) => {
+      const replacement = replacementForUrl(resolveUrl(rawUrl, origin));
+      return replacement ?? match;
+    },
+  );
 }
 
 // ==================== Obsidian spacing normalization ====================
@@ -563,7 +602,7 @@ export function rewriteImagePaths(text: string, ctx: PipelineContext): string {
       /!\[((?:\\.|[^\]\\])*)\]\((https?:\/\/[^\s)]+)\)/g,
       (_, alt: string, url: string) => {
         const filename = extractImageFilename(url);
-        const alias = escapeObsidianAlias(unescapeMarkdownLabel(alt));
+        const alias = markdownLabelToObsidianAlias(alt);
         return alias ? `![[${filename}|${alias}]]` : `![[${filename}]]`;
       },
     );

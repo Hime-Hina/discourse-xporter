@@ -8,5 +8,9 @@ export function escapeObsidianAlias(alias: string): string {
 }
 
 export function unescapeMarkdownLabel(label: string): string {
-  return label.replace(/\\([\\[\]])/g, '$1');
+  return label.replace(/\\([\\`*_[\]{}()#+\-.!|>])/g, '$1');
+}
+
+export function markdownLabelToObsidianAlias(label: string): string {
+  return escapeObsidianAlias(unescapeMarkdownLabel(label));
 }
