@@ -36,6 +36,11 @@ import {
 import { injectStyles } from './ui/styles';
 import { showToast } from './ui/toast';
 import {
+  detectTopicIdentity,
+  startTopicLifecycle,
+  type TopicIdentity,
+} from './runtime/topic-lifecycle';
+import {
   initPanel,
   updateProgress,
   resetProgress,
@@ -47,6 +52,7 @@ import {
   initFloorButtons,
   setOnCopyPost,
   getSelectedPosts,
+  clearSelectedPosts,
 } from './ui/floor-buttons';
 import { sleepRandom } from './utils/timing';
 
@@ -75,15 +81,6 @@ function isDiscourse(): boolean {
   );
 }
 
-function getTopicInfo(): { topicId: number; isNested: boolean } | null {
-  const match = location.pathname.match(/^\/(t|nested)\/[^/]+\/(\d+)/);
-  if (!match) return null;
-  return {
-    isNested: match[1] === 'nested',
-    topicId: parseInt(match[2], 10),
-  };
-}
-
 /** Extract forum display name from the page */
 function getForumName(): string {
   // Try og:site_name meta tag first
@@ -103,8 +100,8 @@ function getForumName(): string {
 // ==================== Export Logic ====================
 
 async function doExport(mode: 'obsidian' | 'zip' | 'md'): Promise<void> {
-  const info = getTopicInfo();
-  if (!info) {
+  const topicIdentity = detectTopicIdentity();
+  if (!topicIdentity) {
     showToast('未检测到话题页面', 'error');
     return;
   }
@@ -114,10 +111,10 @@ async function doExport(mode: 'obsidian' | 'zip' | 'md'): Promise<void> {
 
   setExportLock(true);
   try {
-    debugLog('Starting export, mode:', mode, 'topicId:', info.topicId);
+    debugLog('Starting export, mode:', mode, 'topicId:', topicIdentity.topicId);
     const selectedPosts = getSelectedPosts();
     const exportData = await buildTopicExport({
-      topicId: info.topicId,
+      topicId: topicIdentity.topicId,
       origin: window.location.origin,
       forumName: getForumName(),
       formatVersion: FORMAT_VERSION,
@@ -258,8 +255,8 @@ async function handleCopyPost(
   postNumber: number,
   _postId: number,
 ): Promise<void> {
-  const info = getTopicInfo();
-  if (!info) return;
+  const topicIdentity = detectTopicIdentity();
+  if (!topicIdentity) return;
 
   const config = getConfig();
   const origin = window.location.origin;
@@ -267,7 +264,9 @@ async function handleCopyPost(
   try {
     // Fetch just this post's data — try from already loaded DOM first
     // We'll fetch the topic to get the post data
-    const res = await fetch(`/t/topic/${info.topicId}.json?include_raw=true`);
+    const res = await fetch(
+      `/t/topic/${topicIdentity.topicId}.json?include_raw=true`,
+    );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const topic: DiscourseTopic = await res.json();
 
@@ -278,7 +277,7 @@ async function handleCopyPost(
     if (!post) {
       // Fetch individual post by number
       const postsRes = await fetch(
-        `/t/${info.topicId}/posts.json?post_ids[]=${_postId}&include_raw=true`,
+        `/t/${topicIdentity.topicId}/posts.json?post_ids[]=${_postId}&include_raw=true`,
       );
       if (postsRes.ok) {
         const data = await postsRes.json();
@@ -297,7 +296,7 @@ async function handleCopyPost(
 
     const ctx: PipelineContext = {
       origin,
-      topicId: info.topicId,
+      topicId: topicIdentity.topicId,
       topicSlug: topic.slug,
       polls: post.polls ?? [],
       cookedHtml: post.cooked,
@@ -322,43 +321,9 @@ async function handleCopyPost(
 
 // ==================== Init ====================
 
-/** Inject export toggle button into the topic title area (static + sticky header) */
-function injectGlobalToggle(): void {
-  const cls = 'dxp-global-toggle';
-
-  // Try multiple injection targets (flat view → sticky header → nested view)
-  // For sticky header, use .topic-header-extra (flex) instead of .title-wrapper (grid)
-  // to avoid disrupting the grid layout
-  const targets = [
-    document.querySelector('#topic-title .title-wrapper'),
-    document.querySelector('.extra-info-wrapper .topic-header-extra'),
-    document.querySelector('.nested-view__header'),
-  ];
-
-  for (const target of targets) {
-    if (target && !target.querySelector(`.${cls}`)) {
-      const btn = document.createElement('button');
-      btn.className = cls;
-      btn.title = 'Discourse Xporter';
-      btn.textContent = '📤';
-      btn.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        togglePanel();
-      });
-      target.appendChild(btn);
-    }
-  }
-}
-
 // ==================== Outdated Note Check ====================
 
-let outdatedCheckDone = false;
-
 async function checkOutdatedNote(topicId: number): Promise<void> {
-  if (outdatedCheckDone) return;
-  outdatedCheckDone = true;
-
   const config = getConfig();
   if (!config.obsApiKey) return;
 
@@ -375,6 +340,37 @@ async function checkOutdatedNote(topicId: number): Promise<void> {
   } catch {
     // Silent ignore — don't block page
   }
+}
+
+let panelMenuRegistered = false;
+let topicUiInitialized = false;
+
+function registerPanelMenuCommand(): void {
+  if (panelMenuRegistered) return;
+  GM_registerMenuCommand('⚙️ Discourse Xporter', togglePanel);
+  panelMenuRegistered = true;
+}
+
+function activateTopicUi(topicIdentity: TopicIdentity): void {
+  debugLog(
+    `Topic ${topicIdentity.topicId} (${topicIdentity.isNested ? 'nested' : 'flat'} view)`,
+  );
+
+  if (topicUiInitialized) return;
+
+  setOnCopyPost(handleCopyPost);
+  initFloorButtons();
+  initPanel({
+    onExportObsidian: () => doExport('obsidian'),
+    onDownloadZip: () => doExport('zip'),
+    onDownloadMd: () => doExport('md'),
+    onTestConnection: (apiUrl, apiKey) =>
+      testConnection({ apiUrl, apiKey }),
+    onBatchScan: scanExportedNotes,
+    onBatchReExport: doBatchReExport,
+    formatVersion: FORMAT_VERSION,
+  });
+  topicUiInitialized = true;
 }
 
 // ==================== Batch Re-export ====================
@@ -483,41 +479,15 @@ function init(): void {
 
   console.log('[Discourse Xporter] Discourse detected, initializing…');
 
-  // Inject styles
   injectStyles();
+  registerPanelMenuCommand();
 
-  // Check if on a topic page
-  const info = getTopicInfo();
-  if (!info) return;
-
-  debugLog(`Topic ${info.topicId} (${info.isNested ? 'nested' : 'flat'} view)`);
-
-  // Initialize floor buttons
-  setOnCopyPost(handleCopyPost);
-  initFloorButtons();
-
-  // Initialize panel
-  initPanel({
-    onExportObsidian: () => doExport('obsidian'),
-    onDownloadZip: () => doExport('zip'),
-    onDownloadMd: () => doExport('md'),
-    onTestConnection: (apiUrl, apiKey) =>
-      testConnection({ apiUrl, apiKey }),
-    onBatchScan: scanExportedNotes,
-    onBatchReExport: doBatchReExport,
-    formatVersion: FORMAT_VERSION,
+  startTopicLifecycle({
+    activateTopic: activateTopicUi,
+    resetTopicState: clearSelectedPosts,
+    checkOutdatedTopic: checkOutdatedNote,
+    togglePanel,
   });
-
-  // Register menu command
-  GM_registerMenuCommand('⚙️ Discourse Xporter', togglePanel);
-
-  // Inject global toggle button + observe for SPA navigation
-  injectGlobalToggle();
-  const observer = new MutationObserver(() => injectGlobalToggle());
-  observer.observe(document.body, { childList: true, subtree: true });
-
-  // Async: check for outdated notes (passive reminder)
-  void checkOutdatedNote(info.topicId);
 }
 
 init();
