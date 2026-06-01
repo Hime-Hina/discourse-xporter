@@ -8,7 +8,6 @@ import {
 import { replaceEmoji } from './emoji-map';
 import { cookedToMarkdown } from './cooked-fallback';
 import { resolveUrl, topicUrl } from '../utils/url';
-import { markdownLabelToObsidianAlias } from '../utils/obsidian';
 
 /**
  * Process raw Markdown through the full transformation pipeline.
@@ -52,9 +51,7 @@ export function processRaw(raw: string, ctx: PipelineContext): string {
   //     would otherwise read as wikilinks.
   text = escapeBracketedLinkLabels(text);
 
-  // NOTE: Image path rewriting (rewriteImagePaths) is intentionally NOT called here.
-  // It's handled at export time in main.ts to avoid premature URL replacement
-  // that would prevent image collection/download.
+  // Image path rewriting is export-layer behavior; raw output must keep source URLs.
 
   // 12. Make block/media boundaries explicit for Obsidian rendering.
   text = normalizeObsidianSpacing(text);
@@ -587,35 +584,4 @@ function replaceAllLiteral(
   replacement: string,
 ): string {
   return search ? text.split(search).join(replacement) : text;
-}
-
-// ==================== Image path rewriting ====================
-
-export function rewriteImagePaths(text: string, ctx: PipelineContext): string {
-  const { imgMode, imgDir } = ctx.config;
-
-  if (imgMode === 'embed' || imgMode === 'none') return text;
-
-  if (imgMode === 'file') {
-    // Obsidian wikilink format: ![[filename|alt]]
-    return text.replace(
-      /!\[((?:\\.|[^\]\\])*)\]\((https?:\/\/[^\s)]+)\)/g,
-      (_, alt: string, url: string) => {
-        const filename = extractImageFilename(url);
-        const alias = markdownLabelToObsidianAlias(alt);
-        return alias ? `![[${filename}|${alias}]]` : `![[${filename}]]`;
-      },
-    );
-  }
-
-  return text;
-}
-
-function extractImageFilename(url: string): string {
-  try {
-    const pathname = new URL(url).pathname;
-    return pathname.split('/').pop() || 'image';
-  } catch {
-    return 'image';
-  }
 }

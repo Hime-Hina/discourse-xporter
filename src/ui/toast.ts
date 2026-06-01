@@ -1,5 +1,3 @@
-declare function GM_addStyle(css: string): void;
-
 export interface ToastAction {
   label: string;
   onClick: () => void;

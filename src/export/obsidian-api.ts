@@ -93,52 +93,6 @@ export async function testConnection(cfg: ObsidianApiConfig): Promise<boolean> {
   }
 }
 
-/** Check if a note already exists */
-export async function noteExists(
-  cfg: ObsidianApiConfig,
-  path: string,
-): Promise<boolean> {
-  try {
-    const res = await gmRequest({
-      method: 'GET',
-      url: apiUrl(cfg, `/vault/${encodePath(path)}`),
-      headers: {
-        ...makeHeaders(cfg.apiKey),
-        Accept: 'application/vnd.olrapi.note+json',
-      },
-    });
-    return res.status === 200;
-  } catch {
-    return false;
-  }
-}
-
-/** Search for existing note by topic_id */
-export async function searchByTopicId(
-  cfg: ObsidianApiConfig,
-  topicId: number,
-): Promise<string | null> {
-  try {
-    const res = await gmRequest({
-      method: 'POST',
-      url: apiUrl(cfg, '/search/'),
-      headers: makeHeaders(cfg.apiKey, 'application/vnd.olrapi.jsonlogic+json'),
-      data: JSON.stringify({
-        '==': [{ var: 'frontmatter.topic_id' }, topicId],
-      }),
-    });
-    if (res.status === 200) {
-      const results = JSON.parse(res.responseText);
-      if (Array.isArray(results) && results.length > 0) {
-        return results[0].filename;
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return null;
-}
-
 /** Search for outdated note by topic_id (version < formatVersion or missing) */
 export async function searchOutdatedByTopicId(
   cfg: ObsidianApiConfig,

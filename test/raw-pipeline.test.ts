@@ -13,7 +13,6 @@ import {
   transformQuotePreviews,
   normalizeObsidianSpacing,
   escapeBracketedLinkLabels,
-  rewriteImagePaths,
 } from '../src/core/raw-pipeline';
 
 function mockCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
@@ -311,16 +310,5 @@ describe('escapeBracketedLinkLabels', () => {
     const result = escapeBracketedLinkLabels(input);
 
     expect(result).toBe('```\n[[1]](#footnote-1)\n```\n[\\[1\\]](#footnote-1)');
-  });
-});
-
-describe('rewriteImagePaths', () => {
-  it('escapes Obsidian image aliases with special characters', () => {
-    const result = rewriteImagePaths(
-      String.raw`![a\]b|c](https://example.com/image.png)`,
-      mockCtx({ config: { ...DEFAULTS, imgMode: 'file' } }),
-    );
-
-    expect(result).toBe(String.raw`![[image.png|a\]b&#124;c]]`);
   });
 });

@@ -1,10 +1,4 @@
-import type {
-  DiscourseTopic,
-  DiscoursePost,
-  ProcessedPost,
-  Config,
-  PipelineContext,
-} from '../types';
+import type { DiscoursePost, ProcessedPost, PipelineContext } from '../types';
 import { processRaw } from './raw-pipeline';
 import { cookedToMarkdown } from './cooked-fallback';
 import { avatarUrl, topicUrl } from '../utils/url';

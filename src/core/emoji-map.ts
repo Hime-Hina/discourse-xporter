@@ -383,7 +383,7 @@ export const EMOJI_MAP: Record<string, string> = {
 
 export function replaceEmoji(text: string): string {
   const codeBlocks: string[] = [];
-  let placeholder = (i: number) => `\x00CB${i}\x00`;
+  const placeholder = (i: number) => `\x00CB${i}\x00`;
 
   // 1. Extract fenced code blocks and inline code
   let processed = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, (match) => {

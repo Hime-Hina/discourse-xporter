@@ -56,6 +56,15 @@ describe('image assets', () => {
     );
   });
 
+  it('escapes brackets and pipes in Obsidian image aliases', () => {
+    const markdown = String.raw`![a\]b|c](https://cdn.example.com/a/image.png)`;
+    const assets = collectImageAssets(markdown);
+
+    expect(
+      rewriteImageUrlsForObsidian(markdown, assets, 'attachments', 123),
+    ).toBe(String.raw`![[attachments/123/image.png|a\]b&#124;c]]`);
+  });
+
   it('fails image downloads instead of returning a partial asset map', async () => {
     const markdown = '![image](https://cdn.example.com/a/image.png)';
     const assets = collectImageAssets(markdown);
