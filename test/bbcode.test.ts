@@ -19,7 +19,8 @@ describe('parseQuoteTag', () => {
   });
 
   it('parses a quote with all params (post, topic, full)', () => {
-    const raw = '[quote="bob, post:3, topic:12345, full:true"]\nSome content\n[/quote]';
+    const raw =
+      '[quote="bob, post:3, topic:12345, full:true"]\nSome content\n[/quote]';
     const results = parseQuoteTag(raw);
     expect(results).toHaveLength(1);
     expect(results[0].params.username).toBe('bob');
@@ -57,7 +58,11 @@ describe('parsePollTag', () => {
     expect(results).toHaveLength(1);
     expect(results[0].params.type).toBe('regular');
     expect(results[0].params.results).toBe('always');
-    expect(results[0].params.options).toEqual(['Option A', 'Option B', 'Option C']);
+    expect(results[0].params.options).toEqual([
+      'Option A',
+      'Option B',
+      'Option C',
+    ]);
   });
 
   it('parses a poll with custom name', () => {
@@ -137,5 +142,26 @@ describe('parseDetailsTag', () => {
     expect(results).toHaveLength(1);
     expect(results[0].params.title).toBe('Summary');
     expect(results[0].params.content).toContain('Content here');
+  });
+});
+
+describe('paired tag boundaries', () => {
+  it('matches no-attribute tags without swallowing their content', () => {
+    expect(parseQuoteTag('[quote]body[/quote]')).toEqual([
+      {
+        params: { username: '', post: null, topic: null, full: false },
+        content: 'body',
+        fullMatch: '[quote]body[/quote]',
+        startIndex: 0,
+        endIndex: 19,
+      },
+    ]);
+    expect(parsePollTag('[poll]\n* A\n* B\n[/poll]')[0].params.options).toEqual(
+      ['A', 'B'],
+    );
+    expect(parseQuoteTag('[quote]a[quoteXYZ]b[/quote]')[0].content).toBe(
+      'a[quoteXYZ]b',
+    );
+    expect(parseQuoteTag('[quote]unclosed')).toEqual([]);
   });
 });

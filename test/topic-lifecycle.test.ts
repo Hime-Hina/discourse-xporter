@@ -12,7 +12,8 @@ function setPath(pathname: string): void {
 }
 
 function addFlatTopicTitle(): void {
-  document.body.innerHTML = '<div id="topic-title"><div class="title-wrapper"></div></div>';
+  document.body.innerHTML =
+    '<div id="topic-title"><div class="title-wrapper"></div></div>';
 }
 
 async function waitForMutationObserver(): Promise<void> {
@@ -136,7 +137,9 @@ describe('startTopicLifecycle', () => {
     const lifecycle = startTopicLifecycle({
       activateTopic: vi.fn(),
       resetTopicState: vi.fn(),
-      checkOutdatedTopic: (topicId) => checkedTopicIds.push(topicId),
+      checkOutdatedTopic: (topicId) => {
+        checkedTopicIds.push(topicId);
+      },
       togglePanel: vi.fn(),
     });
 
@@ -149,5 +152,61 @@ describe('startTopicLifecycle', () => {
     expect(checkedTopicIds).toEqual([100, 200]);
 
     lifecycle.stop();
+  });
+});
+
+describe('route notifications and cleanup', () => {
+  it('activates on pushState without requiring unrelated DOM mutations', async () => {
+    addFlatTopicTitle();
+    const activateTopic = vi.fn();
+    const lifecycle = startTopicLifecycle({
+      activateTopic,
+      resetTopicState: vi.fn(),
+      checkOutdatedTopic: vi.fn(),
+      togglePanel: vi.fn(),
+    });
+    setPath('/t/url-only/42');
+    await waitForMutationObserver();
+    expect(activateTopic).toHaveBeenCalledWith({
+      topicId: 42,
+      isNested: false,
+    });
+    expect(document.querySelectorAll('.dxp-global-toggle')).toHaveLength(1);
+    lifecycle.stop();
+  });
+
+  it('handles popstate and title replacement, and restores history on stop', async () => {
+    const originalPushState = window.history.pushState;
+    const activateTopic = vi.fn();
+    const resetTopicState = vi.fn();
+    const lifecycle = startTopicLifecycle({
+      activateTopic,
+      resetTopicState,
+      checkOutdatedTopic: vi.fn(),
+      togglePanel: vi.fn(),
+    });
+    window.history.replaceState({}, '', '/nested/replaced/88');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    await waitForMutationObserver();
+    document.body.innerHTML = '<div class="nested-view__header"></div>';
+    await waitForMutationObserver();
+    await waitForMutationObserver();
+    expect(document.querySelectorAll('.dxp-global-toggle')).toHaveLength(1);
+    document.body.innerHTML = '<div class="nested-view__header"></div>';
+    await waitForMutationObserver();
+    await waitForMutationObserver();
+    expect(document.querySelectorAll('.dxp-global-toggle')).toHaveLength(1);
+    expect(activateTopic).toHaveBeenCalledOnce();
+    lifecycle.stop();
+    expect(window.history.pushState).toBe(originalPushState);
+    expect(resetTopicState).toHaveBeenCalledOnce();
+    setPath('/t/stopped/89');
+    await waitForMutationObserver();
+    expect(activateTopic).toHaveBeenCalledOnce();
+  });
+
+  it('rejects invalid numeric topic identifiers', () => {
+    expect(detectTopicIdentity('/t/topic/0')).toBeNull();
+    expect(detectTopicIdentity('/t/topic/99999999999999999999')).toBeNull();
   });
 });

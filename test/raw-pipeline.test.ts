@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { PipelineContext } from '../src/types';
-import { DEFAULTS } from '../src/config/defaults';
 import {
   processRaw,
   resolveUploadShortUrls,
@@ -10,6 +9,7 @@ import {
   transformPolls,
   transformDates,
   transformDetails,
+  transformHtmlDetails,
   transformQuotePreviews,
   normalizeObsidianSpacing,
   escapeBracketedLinkLabels,
@@ -19,10 +19,9 @@ function mockCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
   return {
     origin: 'https://example.com',
     topicId: 12345,
-    topicSlug: 'test-topic',
+    renderedPostNumbers: new Set([1, 2, 3, 4, 5]),
     polls: [],
     cookedHtml: '',
-    config: { ...DEFAULTS },
     uploadMap: new Map(),
     ...overrides,
   };
@@ -159,7 +158,9 @@ describe('transformDates', () => {
     const date = '[date=2026-01-08 time=14:30:00 timezone="Asia/Shanghai"]';
     const result = transformDates(`${date}\n${date}`);
 
-    expect(result.match(/2026-01-08 14:30 \(Asia\/Shanghai\)/g)?.length).toBe(2);
+    expect(result.match(/2026-01-08 14:30 \(Asia\/Shanghai\)/g)?.length).toBe(
+      2,
+    );
     expect(result).not.toContain('[date=');
   });
 });
@@ -260,7 +261,9 @@ describe('processRaw oneboxes', () => {
       }),
     );
 
-    expect(result).toBe('[Linked topic title](https://example.com/t/linked-topic/456)');
+    expect(result).toBe(
+      '[Linked topic title](https://example.com/t/linked-topic/456)',
+    );
   });
 
   it('replaces raw site-relative topic links with cooked quote previews', () => {
@@ -311,4 +314,122 @@ describe('escapeBracketedLinkLabels', () => {
 
     expect(result).toBe('```\n[[1]](#footnote-1)\n```\n[\\[1\\]](#footnote-1)');
   });
+});
+
+describe('literal code and nested source boundaries', () => {
+  it('keeps every raw code region intact while transforming ordinary text', () => {
+    const literal =
+      '[quote="alice"]body[/quote] [poll]\n* A\n[/poll] [date=2026-01-08 time=14:30] [details="x"]y[/details] :smile: [x](/t/a/1) ![x](upload://abc.png)';
+    for (const code of [
+      `\`\`\`\`md\n${literal}\n\`\`\`\n\n\n\`\`\`\``,
+      `~~~md\n${literal}\n~~~`,
+      `\`\`${literal.replaceAll('\n', ' ')} \` content\`\``,
+      literal
+        .split('\n')
+        .map((line) => `    ${line}`)
+        .join('\n'),
+    ]) {
+      expect(
+        processRaw(
+          code,
+          mockCtx({
+            uploadMap: new Map([
+              ['upload://abc.png', 'https://cdn.example/a.png'],
+            ]),
+          }),
+        ),
+      ).toBe(code);
+      expect(normalizeObsidianSpacing(code)).toBe(code);
+    }
+    expect(processRaw('[date=2026-01-08 time=14:30] :smile:', mockCtx())).toBe(
+      '2026-01-08 14:30 😊',
+    );
+  });
+
+  it('renders nested BBCode by source range, including repeated and malformed blocks', () => {
+    const nested = '[quote="outer"]before\n[quote]inner[/quote]\nafter[/quote]';
+    const rendered =
+      '> [!quote] @outer\n> before\n> > [!quote]\n> > inner\n> after';
+    expect(transformQuotes(nested, mockCtx())).toBe(rendered);
+    expect(transformQuotes(`${nested}\n${nested}`, mockCtx())).toBe(
+      `${rendered}\n${rendered}`,
+    );
+    expect(transformQuotes('[quote]a[quoteXYZ]b[/quote]', mockCtx())).toBe(
+      '> [!quote]\n> a[quoteXYZ]b',
+    );
+    expect(
+      transformQuotes('[quote]unclosed [quote]inner[/quote]', mockCtx()),
+    ).toBe('[quote]unclosed [quote]inner[/quote]');
+    expect(
+      transformDetails(
+        '[details="outer"]before\n[details="inner"]inside[/details]\nafter[/details]',
+      ),
+    ).toBe(
+      '> [!note]- outer\n> before\n> > [!note]- inner\n> > inside\n> after',
+    );
+  });
+
+  it('keeps minutes and safely preserves unsupported nested HTML details', () => {
+    expect(
+      transformDates('[date=2026-01-08 time=14:30 timezone="Asia/Shanghai"]'),
+    ).toBe('2026-01-08 14:30 (Asia/Shanghai)');
+    expect(transformDates('[date=2026-01-08 time=14:30:59]')).toBe(
+      '2026-01-08 14:30',
+    );
+    expect(
+      transformHtmlDetails(
+        '<details open class="x"><summary>Title</summary><p>Body</p></details>',
+      ),
+    ).toBe('> [!note]+ Title\n> Body');
+    const nested =
+      '<details><summary>Outer</summary><details><summary>Inner</summary>Body</details>Tail</details>';
+    expect(transformHtmlDetails(nested)).toBe(nested);
+    expect(
+      transformHtmlDetails('<details open><summary>Unclosed</summary>Body'),
+    ).toBe('<details open><summary>Unclosed</summary>Body');
+  });
+
+  it('uses only available anchors for preview links', () => {
+    const cookedHtml =
+      '<aside class="quote quote-modified" data-post="9" data-topic="12345"><div class="title"><a href="/t/topic/12345/9">Source</a></div><blockquote>Body</blockquote></aside>';
+    expect(
+      transformQuotePreviews(
+        '/t/topic/12345/9',
+        mockCtx({ cookedHtml, renderedPostNumbers: new Set([1]) }),
+      ),
+    ).toBe(
+      '> [!quote] Source · [#9](https://example.com/t/topic/12345/9)\n> Body',
+    );
+  });
+});
+
+it('preserves the remaining subtree with a diagnostic at the explicit nesting limit', () => {
+  const diagnostic = vi
+    .spyOn(console, 'warn')
+    .mockImplementation(() => undefined);
+  const raw = '[quote]'.repeat(65) + 'literal' + '[/quote]'.repeat(65);
+  const expected =
+    Array.from(
+      { length: 64 },
+      (_, depth) => `${'> '.repeat(depth + 1)}[!quote]`,
+    ).join('\n') + `\n${'> '.repeat(64)}[quote]literal[/quote]`;
+  expect(transformQuotes(raw, mockCtx())).toBe(expected);
+  expect(diagnostic).toHaveBeenCalledExactlyOnceWith(
+    '[DXP] Quote nesting exceeds 64 levels; preserving remaining source',
+  );
+  diagnostic.mockRestore();
+});
+
+it('parses the whole cooked source once for Onebox and quote enhancement', () => {
+  const cookedHtml =
+    '<aside class="onebox" data-onebox-src="https://other.example"><article class="onebox-body">Card body</article></aside><aside class="quote quote-modified" data-post="2" data-topic="12345"><blockquote>Quote body</blockquote></aside>';
+  const parse = vi.spyOn(DOMParser.prototype, 'parseFromString');
+  processRaw(
+    'https://other.example\n\n/t/topic/12345/2',
+    mockCtx({ cookedHtml }),
+  );
+  expect(parse.mock.calls.filter(([html]) => html === cookedHtml)).toHaveLength(
+    1,
+  );
+  parse.mockRestore();
 });

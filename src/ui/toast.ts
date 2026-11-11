@@ -26,6 +26,7 @@ export function showToast(
     btn.className = 'dxp-toast-action';
     btn.textContent = action.label;
     btn.addEventListener('click', (e) => {
+      if (!e.isTrusted) return;
       e.stopPropagation();
       toast.remove();
       action.onClick();
@@ -61,8 +62,11 @@ export function showToast(
   });
 
   document.body.appendChild(toast);
-  setTimeout(() => {
-    toast.style.opacity = '0';
-    setTimeout(() => toast.remove(), 300);
-  }, action ? 8000 : duration);
+  setTimeout(
+    () => {
+      toast.style.opacity = '0';
+      setTimeout(() => toast.remove(), 300);
+    },
+    action ? 8000 : duration,
+  );
 }

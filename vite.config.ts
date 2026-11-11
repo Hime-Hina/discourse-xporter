@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import monkey from 'vite-plugin-monkey';
+import { version, description } from './package.json';
 
 type DevServerRequest = {
   method?: string;
@@ -76,12 +77,18 @@ export default defineConfig({
       entry: 'src/main.ts',
       userscript: {
         name: 'Discourse Xporter',
-        namespace: 'https://github.com/you/discourse-xporter',
-        version: '1.0.0',
-        description: 'Export Discourse topics to Obsidian Markdown',
-        author: 'You',
+        namespace: 'https://github.com/Hime-Hina/discourse-xporter',
+        version,
+        description,
+        author: 'Hime-Hina',
+        homepageURL: 'https://github.com/Hime-Hina/discourse-xporter',
+        downloadURL:
+          'https://github.com/Hime-Hina/discourse-xporter/releases/latest/download/discourse-xporter.user.js',
+        updateURL:
+          'https://github.com/Hime-Hina/discourse-xporter/releases/latest/download/discourse-xporter.user.js',
         match: ['*://*/*'],
         noframes: true,
+        sandbox: 'DOM',
         grant: [
           'GM_getValue',
           'GM_setValue',
@@ -90,7 +97,7 @@ export default defineConfig({
           'GM_addStyle',
           'GM_registerMenuCommand',
         ],
-        connect: ['127.0.0.1', 'localhost', '*'],
+        connect: ['127.0.0.1', 'localhost', '[::1]'],
         'run-at': 'document-idle',
       },
       server: {
@@ -98,9 +105,20 @@ export default defineConfig({
       },
       build: {
         externalGlobals: {
-          turndown: ['TurndownService', (version) => `https://unpkg.com/turndown@${version}/dist/turndown.js`],
-          'turndown-plugin-gfm': ['turndownPluginGfm', (version) => `https://unpkg.com/turndown-plugin-gfm@${version}/dist/turndown-plugin-gfm.js`],
-          fflate: ['fflate', (version) => `https://unpkg.com/fflate@${version}/umd/index.js`],
+          turndown: [
+            'TurndownService',
+            (version) =>
+              `https://unpkg.com/turndown@${version}/dist/turndown.js`,
+          ],
+          'turndown-plugin-gfm': [
+            'turndownPluginGfm',
+            (version) =>
+              `https://unpkg.com/turndown-plugin-gfm@${version}/dist/turndown-plugin-gfm.js`,
+          ],
+          fflate: [
+            'fflate',
+            (version) => `https://unpkg.com/fflate@${version}/umd/index.js`,
+          ],
         },
       },
     }),

@@ -35,7 +35,7 @@
 - 面板拆分优先按 section 归属，例如连接设置、筛选设置、高级设置、批量重导。
 - DOM refs 必须有显式接口；禁止新增 `(x as any)._refs`、`dataset` 承载复杂对象等写法。
 
-`(panel as any)._refs` 是历史债务，只能在重构时删除，不能复制为新模式。
+当前面板和筛选 refs 已通过显式接口持有；后续拆分继续沿用这一契约，不重新挂回 DOM 隐藏属性。
 
 ## 楼层按钮
 
@@ -63,6 +63,6 @@ Discourse DOM 是外部输入，允许在 UI 边界检查缺失元素：
 允许使用 `MutationObserver` 应对 Discourse 动态加载：
 
 - `floor-buttons.ts` 观察新增楼层。
-- `main.ts` 观察标题区域注入全局按钮。
+- `runtime/topic-lifecycle.ts` 观察标题区域并注入全局按钮。
 
 定时巡检只能作为 UI 注入兜底，不能驱动业务流程。新增巡检前要说明为什么 `MutationObserver` 不够。

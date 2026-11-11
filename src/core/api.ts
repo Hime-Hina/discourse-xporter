@@ -1,109 +1,316 @@
 import type {
   DiscourseTopic,
   DiscoursePost,
-  UploadLookupResult,
   Config,
   ProgressCallback,
 } from '../types';
-import { sleepRandom } from '../utils/timing';
+import { sleep, sleepRandom, retryDelayMs } from '../utils/timing';
 
-/** Get CSRF token from Discourse meta tag */
-function getCsrfToken(): string {
-  const meta = document.querySelector('meta[name="csrf-token"]');
-  return meta?.getAttribute('content') ?? '';
+export interface RequestContext {
+  origin?: string;
+  signal?: AbortSignal;
 }
 
-/** Fetch topic metadata + first batch of posts */
-export async function fetchTopic(topicId: number): Promise<DiscourseTopic> {
-  const res = await fetch(`/t/topic/${topicId}.json?include_raw=true`);
-  if (!res.ok)
-    throw new Error(`Failed to fetch topic ${topicId}: HTTP ${res.status}`);
-  return res.json();
+export class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly retryAfterMs?: number,
+  ) {
+    super(`HTTP ${status}`);
+    this.name = 'HttpError';
+  }
 }
 
-/** Fetch one post by its stable post ID. */
+const READ_TIMEOUT_MS = 60_000;
+const categoryCache = new Map<string, Map<number, string>>();
+
+function positiveId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function readIds(value: unknown): number[] {
+  if (!Array.isArray(value) || !value.every(positiveId)) {
+    throw new Error('Invalid post ID list');
+  }
+  return [...new Set(value)];
+}
+
+function readPosts(value: unknown, topicId: number): DiscoursePost[] {
+  if (!Array.isArray(value))
+    throw new Error(`Invalid posts response for topic ${topicId}`);
+  for (const post of value) {
+    if (
+      !record(post) ||
+      !positiveId(post.id) ||
+      !positiveId(post.post_number) ||
+      post.topic_id !== topicId ||
+      typeof post.cooked !== 'string' ||
+      typeof post.username !== 'string' ||
+      (post.raw !== undefined && typeof post.raw !== 'string')
+    ) {
+      throw new Error(`Invalid post response for topic ${topicId}`);
+    }
+  }
+  return value as DiscoursePost[];
+}
+
+function requestUrl(path: string, context: RequestContext): string {
+  return context.origin ? new URL(path, context.origin).href : path;
+}
+
+/** The timeout covers both the response headers and consumption of its body. */
+async function readResponse<T>(
+  url: string,
+  consume: (response: Response) => Promise<T>,
+  context: RequestContext,
+  init: RequestInit = {},
+  timeoutMs = READ_TIMEOUT_MS,
+): Promise<T> {
+  const attempts = !init.method || init.method === 'GET' ? 2 : 1;
+  for (let attempt = 1; ; attempt++) {
+    context.signal?.throwIfAborted();
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let rejectAbort: ((reason: unknown) => void) | undefined;
+    const abort = () => {
+      const reason =
+        context.signal?.reason ??
+        new DOMException('Request aborted', 'AbortError');
+      controller.abort(reason);
+      rejectAbort?.(reason);
+    };
+    context.signal?.addEventListener('abort', abort, { once: true });
+    try {
+      return await Promise.race([
+        (async () => {
+          const response = await fetch(url, {
+            ...init,
+            signal: controller.signal,
+          });
+          if (!response.ok)
+            throw new HttpError(
+              response.status,
+              retryDelayMs(
+                response.headers?.get('Retry-After') ?? null,
+                attempt,
+              ),
+            );
+          return consume(response);
+        })(),
+        new Promise<never>((_, reject) => {
+          rejectAbort = reject;
+          if (context.signal?.aborted) abort();
+          timer = setTimeout(() => {
+            const reason = new DOMException(
+              'Request timed out',
+              'TimeoutError',
+            );
+            controller.abort(reason);
+            reject(reason);
+          }, timeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      context.signal?.throwIfAborted();
+      if (
+        attempt >= attempts ||
+        (error instanceof HttpError &&
+          error.status !== 429 &&
+          error.status < 500) ||
+        (!(error instanceof HttpError) &&
+          !(error instanceof TypeError) &&
+          !(error instanceof DOMException && error.name === 'TimeoutError'))
+      )
+        throw error;
+      const delay = error instanceof HttpError ? error.retryAfterMs : undefined;
+      if (delay !== undefined) await sleep(delay, context.signal);
+      else await sleep(retryDelayMs(null, attempt), context.signal);
+    } finally {
+      clearTimeout(timer);
+      context.signal?.removeEventListener('abort', abort);
+    }
+  }
+}
+
+async function readJson(
+  path: string,
+  context: RequestContext,
+  init?: RequestInit,
+): Promise<unknown> {
+  return readResponse(
+    requestUrl(path, context),
+    (response) => response.json(),
+    context,
+    init,
+  );
+}
+
+/** Fetch topic metadata without a fabricated slug that could discard query parameters on redirect. */
+export async function fetchTopic(
+  topicId: number,
+  context: RequestContext = {},
+): Promise<DiscourseTopic> {
+  if (!positiveId(topicId)) throw new Error('Invalid topic ID');
+  const topic = await readJson(`/t/${topicId}.json?include_raw=true`, context);
+  if (
+    !record(topic) ||
+    topic.id !== topicId ||
+    typeof topic.title !== 'string' ||
+    !positiveId(topic.category_id) ||
+    !positiveId(topic.user_id) ||
+    !record(topic.post_stream) ||
+    !record(topic.details) ||
+    !record(topic.details.created_by) ||
+    typeof topic.details.created_by.username !== 'string'
+  )
+    throw new Error(`Invalid topic response for topic ${topicId}`);
+  readPosts(topic.post_stream.posts, topicId);
+  if (topic.post_stream.stream !== undefined) readIds(topic.post_stream.stream);
+  else if (
+    topic.post_stream.isMegaTopic !== true ||
+    !positiveId(topic.post_stream.lastId)
+  )
+    throw new Error(`Invalid post stream for topic ${topicId}`);
+  return topic as unknown as DiscourseTopic;
+}
+
 export async function fetchPostById(
   topicId: number,
   postId: number,
+  context: RequestContext = {},
 ): Promise<DiscoursePost | null> {
-  const res = await fetch(
+  if (!positiveId(topicId) || !positiveId(postId))
+    throw new Error('Invalid post ID');
+  const payload = await readJson(
     `/t/${topicId}/posts.json?post_ids[]=${postId}&include_raw=true`,
+    context,
   );
-  if (!res.ok) {
-    throw new Error(`Failed to fetch post ${postId}: HTTP ${res.status}`);
-  }
-
-  const postsPayload = await res.json();
-  const posts = postsPayload?.post_stream?.posts;
-  if (!Array.isArray(posts)) {
-    throw new Error(`Invalid post response for topic ${topicId}`);
-  }
-
-  return posts[0] ?? null;
+  const posts = readPosts(
+    record(payload) && record(payload.post_stream)
+      ? payload.post_stream.posts
+      : undefined,
+    topicId,
+  );
+  return posts.find((post) => post.id === postId) ?? null;
 }
 
-/** Fetch missing posts in batches */
+/**
+ * post_ids with post_number=1 returns every visible ID after the first post (skip_limit).
+ * Together with the first post this is an authoritative finite list, including for mega topics.
+ * Protocol: Discourse TopicsController#post_ids / TopicView#filter_posts_by_post_number.
+ */
+export async function fetchTopicPostIds(
+  topic: Pick<DiscourseTopic, 'id' | 'post_stream'>,
+  context: RequestContext = {},
+  usernames?: readonly string[],
+): Promise<number[]> {
+  if (!usernames?.length && topic.post_stream.stream)
+    return readIds(topic.post_stream.stream);
+  const firstPost = topic.post_stream.posts.find(
+    (post) => post.post_number === 1,
+  );
+  if (!firstPost)
+    throw new Error(
+      `Cannot establish first visible post for topic ${topic.id}`,
+    );
+  const params = new URLSearchParams({ post_number: '1' });
+  if (usernames?.length) params.set('username_filters', usernames.join(','));
+  const payload = await readJson(
+    `/t/${topic.id}/post_ids.json?${params}`,
+    context,
+  );
+  const ids = readIds(record(payload) ? payload.post_ids : undefined);
+  const completeIds = [...new Set([firstPost.id, ...ids])];
+  if (
+    !usernames?.length &&
+    topic.post_stream.isMegaTopic &&
+    !completeIds.includes(topic.post_stream.lastId!)
+  ) {
+    throw new Error(
+      `Incomplete mega-topic ID list for topic ${topic.id}: last post is missing`,
+    );
+  }
+  return completeIds;
+}
+
 export async function fetchAllPosts(
   topicId: number,
-  stream: number[],
+  stream: readonly number[],
   initialPosts: DiscoursePost[],
-  config: Config,
+  config: Pick<Config, 'batchSize' | 'batchDelayMin' | 'batchDelayMax'>,
   onProgress?: ProgressCallback,
+  context: RequestContext = {},
 ): Promise<DiscoursePost[]> {
-  const allPosts = [...initialPosts];
-  const fetchedIds = new Set(allPosts.map((p) => p.id));
-  const missingIds = stream.filter((id) => !fetchedIds.has(id));
-  const batchSize = Math.max(1, Math.floor(config.batchSize));
-
-  for (let i = 0; i < missingIds.length; i += batchSize) {
-    if (i > 0) await sleepRandom(config.batchDelayMin, config.batchDelayMax);
-
-    const batch = missingIds.slice(i, i + batchSize);
-    const progress = allPosts.length / stream.length;
-    onProgress?.(`拉取帖子 ${allPosts.length}/${stream.length}`, progress);
-
-    const qs = batch.map((id) => `post_ids[]=${id}`).join('&');
-    const res = await fetchWithRetry(
-      `/t/${topicId}/posts.json?${qs}&include_raw=true`,
-    );
-    const data = await res.json();
-    const posts = data?.post_stream?.posts;
-    if (!Array.isArray(posts)) {
-      throw new Error(`Invalid posts response for topic ${topicId}`);
-    }
-    allPosts.push(...posts);
+  const expectedIds = readIds(stream);
+  const expected = new Set(expectedIds);
+  const allPosts = new Map(
+    readPosts(initialPosts, topicId)
+      .filter((post) => expected.has(post.id))
+      .map((post) => [post.id, post]),
+  );
+  const missingIds = expectedIds.filter((id) => !allPosts.has(id));
+  if (
+    !Number.isSafeInteger(config.batchSize) ||
+    config.batchSize < 1 ||
+    config.batchSize > 100
+  ) {
+    throw new Error('Invalid request batch size');
   }
-
-  const resultIds = new Set(allPosts.map((p) => p.id));
-  const stillMissing = stream.filter((id) => !resultIds.has(id));
-  if (stillMissing.length > 0) {
-    throw new Error(
-      `Failed to fetch all posts for topic ${topicId}: missing ${stillMissing.length}`,
+  for (let i = 0; i < missingIds.length; i += config.batchSize) {
+    context.signal?.throwIfAborted();
+    if (i > 0)
+      await sleepRandom(
+        config.batchDelayMin,
+        config.batchDelayMax,
+        context.signal,
+      );
+    const batch = missingIds.slice(i, i + config.batchSize);
+    onProgress?.(
+      `拉取帖子 ${allPosts.size}/${expectedIds.length}`,
+      allPosts.size / expectedIds.length,
     );
+    const query = batch.map((id) => `post_ids[]=${id}`).join('&');
+    const payload = await readJson(
+      `/t/${topicId}/posts.json?${query}&include_raw=true`,
+      context,
+    );
+    const posts = readPosts(
+      record(payload) && record(payload.post_stream)
+        ? payload.post_stream.posts
+        : undefined,
+      topicId,
+    );
+    for (const post of posts)
+      if (expected.has(post.id)) allPosts.set(post.id, post);
+    const missing = batch.filter((id) => !allPosts.has(id));
+    if (missing.length)
+      throw new Error(
+        `Failed to fetch all posts for topic ${topicId}: missing ${missing.length}`,
+      );
   }
-
-  allPosts.sort((a, b) => a.post_number - b.post_number);
-  return allPosts;
+  return [...allPosts.values()].sort((a, b) => a.post_number - b.post_number);
 }
 
-/** Batch resolve upload:// short URLs to full CDN URLs */
 export async function resolveUploadUrls(
   shortUrls: string[],
+  context: RequestContext = {},
 ): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  if (shortUrls.length === 0) return map;
-
-  // Deduplicate
+  const uploads = new Map<string, string>();
   const unique = [...new Set(shortUrls)];
-
-  // Batch in chunks of 50 to avoid oversized requests
   for (let i = 0; i < unique.length; i += 50) {
-    const batch = unique.slice(i, i + 50);
+    context.signal?.throwIfAborted();
     try {
-      const csrfToken = getCsrfToken();
-      const res = await fetch('/uploads/lookup-urls', {
+      const csrfToken =
+        document
+          .querySelector('meta[name="csrf-token"]')
+          ?.getAttribute('content') ?? '';
+      const payload = await readJson('/uploads/lookup-urls', context, {
         method: 'POST',
-        body: JSON.stringify({ short_urls: batch }),
+        body: JSON.stringify({ short_urls: unique.slice(i, i + 50) }),
         headers: {
           'Content-Type': 'application/json',
           'X-CSRF-Token': csrfToken,
@@ -111,87 +318,68 @@ export async function resolveUploadUrls(
           Accept: 'application/json',
         },
       });
-      if (res.ok) {
-        const contentType = res.headers.get('content-type') ?? '';
-        if (!contentType.includes('application/json')) {
-          console.warn(
-            '[DXP] /uploads/lookup-urls returned non-JSON:',
-            contentType,
-          );
-          continue;
+      if (!Array.isArray(payload))
+        throw new Error('Invalid upload URL response');
+      for (const upload of payload) {
+        if (
+          record(upload) &&
+          typeof upload.short_url === 'string' &&
+          typeof upload.url === 'string'
+        ) {
+          uploads.set(upload.short_url, upload.url);
         }
-        const results: UploadLookupResult[] = await res.json();
-        for (const item of results) {
-          map.set(item.short_url, item.url);
-        }
-      } else {
-        console.warn('[DXP] /uploads/lookup-urls HTTP', res.status);
       }
-    } catch (err) {
-      console.warn('[DXP] /uploads/lookup-urls failed:', err);
+    } catch (error) {
+      context.signal?.throwIfAborted();
+      console.warn('[DXP] /uploads/lookup-urls failed:', error);
     }
   }
-  return map;
+  return uploads;
 }
 
-/** Fetch category name by ID. Falls back to DOM extraction. */
-export async function fetchCategoryName(categoryId: number): Promise<string> {
-  // Try DOM first — select LAST breadcrumb item (handles subcategories)
-  const breadcrumbs = document.querySelectorAll(
-    '.category-breadcrumb .badge-category__name',
-  );
-  const lastBreadcrumb = breadcrumbs[breadcrumbs.length - 1];
-  if (lastBreadcrumb?.textContent) return lastBreadcrumb.textContent.trim();
-
-  // Fallback: /site.json contains ALL categories including subcategories
+/** Page breadcrumbs are not an authority for a different category or topic. */
+export async function fetchCategoryName(
+  categoryId: number,
+  context: RequestContext = {},
+): Promise<string> {
+  if (!positiveId(categoryId)) throw new Error('Invalid category ID');
+  const origin = context.origin ?? location.origin;
   try {
-    const res = await fetch('/site.json');
-    if (res.ok) {
-      const data = await res.json();
-      const cat = (
-        data.categories as { id: number; name: string }[] | undefined
-      )?.find((c) => c.id === categoryId);
-      if (cat) return cat.name;
+    let categories = categoryCache.get(origin);
+    if (!categories) {
+      const payload = await readJson('/site.json', { ...context, origin });
+      if (!record(payload) || !Array.isArray(payload.categories))
+        throw new Error('Invalid categories response');
+      categories = new Map();
+      for (const category of payload.categories) {
+        if (
+          record(category) &&
+          positiveId(category.id) &&
+          typeof category.name === 'string'
+        ) {
+          categories.set(category.id, category.name);
+        }
+      }
+      categoryCache.set(origin, categories);
     }
-  } catch {
-    // ignore
+    return categories.get(categoryId) ?? `category-${categoryId}`;
+  } catch (error) {
+    context.signal?.throwIfAborted();
+    console.warn('[DXP] Category lookup failed:', error);
+    return `category-${categoryId}`;
   }
-  return `category-${categoryId}`;
 }
 
-/** Fetch binary data with timeout (for image downloads) */
 export async function fetchBinary(
   url: string,
-  timeoutMs = 60000,
+  timeoutMs = READ_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const buffer = await res.arrayBuffer();
-    return new Uint8Array(buffer);
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-// ==================== Helpers ====================
-
-async function fetchWithRetry(url: string, attempts = 2): Promise<Response> {
-  let lastStatus = 0;
-
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    const res = await fetch(url);
-    if (res.ok) return res;
-
-    lastStatus = res.status;
-    if (attempt < attempts && (res.status === 429 || res.status >= 500)) {
-      await sleepRandom(500, 1200);
-      continue;
-    }
-    throw new Error(`Failed to fetch posts: HTTP ${res.status}`);
-  }
-
-  throw new Error(`Failed to fetch posts: HTTP ${lastStatus}`);
+  return readResponse(
+    url,
+    async (response) => new Uint8Array(await response.arrayBuffer()),
+    { signal },
+    {},
+    timeoutMs,
+  );
 }

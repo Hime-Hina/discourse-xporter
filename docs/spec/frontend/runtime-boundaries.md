@@ -8,10 +8,10 @@
 
 1. `isDiscourse()` 检查 `meta[name="generator"]` 或 `window.Discourse`。
 2. `injectStyles()` 注入 `.dxp-*` 样式。
-3. `GM_registerMenuCommand` 注册菜单，只负责打开面板。
+3. `GM_registerMenuCommand` 注册面板菜单与隔离的密钥设置/清除菜单；页面标记不提供特权授权。
 4. `startTopicLifecycle()` 负责检测 `/t/{slug}/{topic_id}` 和 `/nested/{slug}/{topic_id}` 话题页面，并在 Discourse SPA 导航进入话题时激活话题 UI。
 5. 话题激活回调初始化 `initFloorButtons()`、`initPanel()`，并补注入 `.dxp-global-toggle`。
-6. 异步检查过期笔记必须按 topic ID 去重，且不能阻塞页面初始化。
+6. 异步检查按启动时 origin + topic ID 绑定；响应及动作仍属于当前话题时才展示/执行，且不能阻塞初始化。
 
 ## `main.ts` 职责上限
 
@@ -27,6 +27,7 @@
 GM API 只在使用它的文件中声明：
 
 - [src/config/storage.ts](../../../src/config/storage.ts)：`GM_getValue`、`GM_setValue`
+- [src/config/credentials.ts](../../../src/config/credentials.ts)：密钥专用 `GM_registerMenuCommand` 与浏览器原生 prompt
 - [src/export/clipboard.ts](../../../src/export/clipboard.ts)：`GM_setClipboard`
 - [src/export/obsidian-api.ts](../../../src/export/obsidian-api.ts)：`GM_xmlhttpRequest`
 - [src/ui/styles.ts](../../../src/ui/styles.ts)：`GM_addStyle`
@@ -48,3 +49,7 @@ Discourse 是 SPA，帖子和标题区域可能动态更新。允许使用 `Muta
 - [src/ui/floor-buttons.ts](../../../src/ui/floor-buttons.ts) 观察楼层列表以补注入楼层按钮。
 
 不要在核心转换、导出适配或配置层引入 DOM 观察逻辑。
+
+所有产生文档的入口复用 `runtime/export-operation.ts`；首次 await 前固定选择、post ID、origin、配置与筛选，取消信号沿构建/交付/批量传播，收束在途操作后解锁。楼层观察器仅在话题激活时运行，离页清理；history、popstate 与 Navigation API 的适配仅归 runtime。
+
+真实 Tampermonkey 的路由/主题验收仍由 #16 跟踪。合成 DOM 测试不替代真实管理器或 Obsidian 集成结果。

@@ -1,7 +1,7 @@
-import type { DiscoursePost, ProcessedPost, PipelineContext } from '../types';
-import { processRaw } from './raw-pipeline';
-import { cookedToMarkdown } from './cooked-fallback';
+import type { DiscoursePost, ExportProfile, ProcessedPost } from '../types';
+import { postToMarkdown, type PostContentContext } from './post-content';
 import { avatarUrl, topicUrl } from '../utils/url';
+import { floorLink, getRenderedPostNumbers } from '../utils/obsidian';
 
 // ==================== Frontmatter ====================
 
@@ -25,20 +25,15 @@ export interface FrontmatterData {
   closed: boolean;
   archived: boolean;
   xporter_version: number;
+  export_profile?: ExportProfile;
 }
 
 /** Escape a YAML string value */
-function yamlStr(str: string): string {
-  if (!str) return '""';
-  if (/[:#\[\]{}&*!|>'"%@`,?\r\n\t]/.test(str) || str.trim() !== str) {
-    return `"${str
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/\r/g, '\\r')
-      .replace(/\n/g, '\\n')
-      .replace(/\t/g, '\\t')}"`;
-  }
-  return str;
+function yamlJson(value: string | ExportProfile): string {
+  // YAML treats these additional Unicode characters as line breaks.
+  return JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g, (char) =>
+    `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
 }
 
 /** Format ISO date string to local date/time */
@@ -60,22 +55,22 @@ function formatDate(dateStr: string, format?: string): string {
 export function buildFrontmatter(data: FrontmatterData): string {
   const tags =
     data.tags.length > 0
-      ? '\n' + data.tags.map((t) => `  - ${yamlStr(t)}`).join('\n')
+      ? '\n' + data.tags.map((t) => `  - ${yamlJson(t)}`).join('\n')
       : ' []';
 
   const lines = [
     '---',
     `xporter_version: ${data.xporter_version}`,
-    `title: ${yamlStr(data.title)}`,
-    `source: ${yamlStr(data.source)}`,
-    `author: ${yamlStr(data.author)}`,
-    `category: ${yamlStr(data.category)}`,
-    `forum: ${yamlStr(data.forum)}`,
+    `title: ${yamlJson(data.title)}`,
+    `source: ${yamlJson(data.source)}`,
+    `author: ${yamlJson(data.author)}`,
+    `category: ${yamlJson(data.category)}`,
+    `forum: ${yamlJson(data.forum)}`,
     `tags:${tags}`,
-    `created: ${data.created}`,
-    `exported: ${data.exported}`,
+    `created: ${yamlJson(data.created)}`,
+    `exported: ${yamlJson(data.exported)}`,
     `topic_id: ${data.topic_id}`,
-    `slug: ${yamlStr(data.slug)}`,
+    `slug: ${yamlJson(data.slug)}`,
     `posts_count: ${data.posts_count}`,
     `reply_count: ${data.reply_count}`,
     `views: ${data.views}`,
@@ -86,6 +81,7 @@ export function buildFrontmatter(data: FrontmatterData): string {
 
   if (data.closed) lines.push('closed: true');
   if (data.archived) lines.push('archived: true');
+  if (data.export_profile) lines.push(`export_profile: ${yamlJson(data.export_profile)}`);
 
   lines.push('---');
   return lines.join('\n');
@@ -126,6 +122,7 @@ export function buildTemplateVars(
   post: ProcessedPost,
   origin: string,
   topicId: number,
+  renderedPostNumbers?: ReadonlySet<number>,
 ): TemplateVars {
   const authorFull =
     post.name && post.name !== post.username
@@ -138,7 +135,7 @@ export function buildTemplateVars(
   const likesDisplay = post.likes > 0 ? ` · ❤️ ${post.likes}` : '';
   const replyToDisplay =
     post.reply_to_post_number !== null
-      ? ` · → [[#^floor-${post.reply_to_post_number}|#${post.reply_to_post_number}]]`
+      ? ` · → ${floorLink(origin, topicId, post.reply_to_post_number, renderedPostNumbers)}`
       : '';
   const opBadge = post.is_op ? '🏠 楼主' : '';
   const opBadgeDisplay = post.is_op ? ' · 🏠 楼主' : '';
@@ -151,7 +148,6 @@ export function buildTemplateVars(
   const highlight = post.selected ? ' · ==已选中==' : '';
   const solutionBadge = post.is_solution ? '✅ 解决方案' : '';
   const solutionBadgeDisplay = post.is_solution ? ' · ✅ 解决方案' : '';
-  // Always add block ref so reply links work via [[#^floor-N]]
   const blockRef = `^floor-${post.post_number}`;
 
   return {
@@ -188,13 +184,11 @@ export function buildTemplateVars(
 
 /** Render a floor template with variables */
 export function renderTemplate(template: string, vars: TemplateVars): string {
-  let result = template;
-  for (const [key, value] of Object.entries(vars)) {
-    const str = String(value);
-    // Use function replacement to avoid $ being interpreted as special pattern
-    result = result.replaceAll(`{{${key}}}`, () => str);
-  }
-  return result;
+  return template.replace(/{{(\w+)}}/g, (placeholder, key: string) =>
+    Object.prototype.hasOwnProperty.call(vars, key)
+      ? String(vars[key as keyof TemplateVars])
+      : placeholder,
+  );
 }
 
 // ==================== Document Assembly ====================
@@ -205,26 +199,10 @@ export function renderTemplate(template: string, vars: TemplateVars): string {
 export function processPost(
   post: DiscoursePost,
   opUserId: number,
-  ctx: PipelineContext,
+  ctx: PostContentContext,
   selected: boolean,
 ): ProcessedPost {
-  let content: string;
-
-  try {
-    if (post.raw) {
-      content = processRaw(post.raw, {
-        ...ctx,
-        polls: post.polls ?? [],
-        cookedHtml: post.cooked,
-      });
-    } else {
-      // Fallback to cooked
-      content = cookedToMarkdown(post.cooked);
-    }
-  } catch {
-    // Ultimate fallback
-    content = cookedToMarkdown(post.cooked);
-  }
+  const content = postToMarkdown(post, ctx);
 
   const likeAction = post.actions_summary?.find((a) => a.id === 2);
   const likes = likeAction?.count ?? 0;
@@ -262,14 +240,18 @@ export function assembleDocument(
   acceptedAnswerPostNumber?: number,
 ): string {
   const parts: string[] = [frontmatter, '\n\n'];
+  const renderedPostNumbers = getRenderedPostNumbers(
+    posts.map((post) => post.post_number),
+    template,
+  );
 
   for (const post of posts) {
-    const vars = buildTemplateVars(post, origin, topicId);
+    const vars = buildTemplateVars(post, origin, topicId, renderedPostNumbers);
     const rendered = renderTemplate(template, vars);
     parts.push(rendered);
     if (post.post_number === 1 && acceptedAnswerPostNumber !== undefined) {
       parts.push(
-        `\n> [!success] 解决方案：[[#^floor-${acceptedAnswerPostNumber}|#${acceptedAnswerPostNumber}]]\n`,
+        `\n> [!success] 解决方案：${floorLink(origin, topicId, acceptedAnswerPostNumber, renderedPostNumbers)}\n`,
       );
     }
     parts.push('\n');
@@ -282,7 +264,7 @@ export function assembleDocument(
     for (const p of highlighted) {
       const date = formatDate(p.created_at);
       parts.push(
-        `- [[#^floor-${p.post_number}|#${p.post_number} · ${p.username} · ${date}]]\n`,
+        `- ${floorLink(origin, topicId, p.post_number, renderedPostNumbers, `#${p.post_number} · ${p.username} · ${date}`)}\n`,
       );
     }
   }

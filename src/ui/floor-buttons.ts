@@ -3,6 +3,7 @@ import { showToast } from './toast';
 // ==================== State ====================
 
 const selectedPosts = new Set<number>();
+const selectedPostIds = new Map<number, number>();
 
 let onCopyPost: ((postNumber: number, postId: number) => Promise<void>) | null =
   null;
@@ -14,11 +15,16 @@ export function setOnCopyPost(
 }
 
 export function getSelectedPosts(): Set<number> {
-  return selectedPosts;
+  return new Set(selectedPosts);
+}
+
+export function getSelectedPostIds(): ReadonlyMap<number, number> {
+  return new Map(selectedPostIds);
 }
 
 export function clearSelectedPosts(): void {
   selectedPosts.clear();
+  selectedPostIds.clear();
   document
     .querySelectorAll('.dxp-selected')
     .forEach((el) => el.classList.remove('dxp-selected'));
@@ -40,6 +46,7 @@ const ICON_CHECKED = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16
 interface ViewSelector {
   postContainer: string;
   actionsArea: string;
+  actionsContainer?: string;
 }
 
 const VIEW_SELECTORS: ViewSelector[] = [
@@ -56,11 +63,13 @@ const VIEW_SELECTORS: ViewSelector[] = [
   // nested OP
   {
     postContainer: '.nested-view__op article[data-post-id]',
+    actionsContainer: '.nested-view__op',
     actionsArea: 'section.nested-view__op-menu .actions',
   },
   // nested reply
   {
     postContainer: '.nested-post__article[data-post-id]',
+    actionsContainer: '.nested-post',
     actionsArea: 'section.nested-post__menu .actions',
   },
 ];
@@ -111,7 +120,13 @@ function getPostMeta(
     if (m) postNumber = Number(m[1]);
   }
 
-  if (!postId || !postNumber) return null;
+  if (
+    !Number.isSafeInteger(postId) ||
+    postId <= 0 ||
+    !Number.isSafeInteger(postNumber) ||
+    postNumber <= 0
+  )
+    return null;
   return { postNumber, postId };
 }
 
@@ -121,38 +136,14 @@ export function injectButtonsToPost(postElement: Element): void {
   const meta = getPostMeta(postElement);
   if (!meta) return;
 
-  // Find the actions area within (or near) this post element
-  let actionsArea: Element | null = null;
-  for (const sel of VIEW_SELECTORS) {
-    // Check if this post matches the selector's container pattern
-    if (postElement.matches(sel.postContainer.split(' ').pop()!)) {
-      actionsArea =
-        postElement.querySelector(sel.actionsArea) ??
-        postElement
-          .closest(sel.postContainer)
-          ?.querySelector(sel.actionsArea) ??
-        null;
-      if (actionsArea) break;
-    }
-  }
-  // Fallback: try common selectors directly
-  if (!actionsArea) {
-    actionsArea =
-      postElement.querySelector('nav.post-controls .actions') ??
-      postElement.querySelector('section.nested-view__op-menu .actions') ??
-      postElement.querySelector('section.nested-post__menu .actions') ??
-      null;
-  }
-  // For nested replies the actions area may be a sibling
-  if (!actionsArea) {
-    const parent = postElement.parentElement;
-    if (parent) {
-      actionsArea =
-        parent.querySelector('section.nested-post__menu .actions') ??
-        parent.querySelector('section.nested-view__op-menu .actions') ??
-        null;
-    }
-  }
+  const selector = VIEW_SELECTORS.find((candidate) =>
+    postElement.matches(candidate.postContainer),
+  );
+  if (!selector) return;
+  const actionsContainer = selector.actionsContainer
+    ? postElement.closest(selector.actionsContainer)
+    : postElement;
+  const actionsArea = actionsContainer?.querySelector(selector.actionsArea);
 
   if (!actionsArea) return;
 
@@ -164,6 +155,7 @@ export function injectButtonsToPost(postElement: Element): void {
   // --- Copy button ---
   const copyBtn = createButton('dxp-copy-btn', '复制楼层 Markdown', ICON_COPY);
   copyBtn.addEventListener('click', async (e) => {
+    if (!e.isTrusted) return;
     e.preventDefault();
     e.stopPropagation();
     if (!onCopyPost) {
@@ -187,16 +179,19 @@ export function injectButtonsToPost(postElement: Element): void {
   if (isSelected) selectBtn.classList.add('dxp-active');
 
   selectBtn.addEventListener('click', (e) => {
+    if (!e.isTrusted) return;
     e.preventDefault();
     e.stopPropagation();
 
     if (selectedPosts.has(postNumber)) {
       selectedPosts.delete(postNumber);
+      selectedPostIds.delete(postNumber);
       selectBtn.innerHTML = ICON_UNCHECKED;
       selectBtn.classList.remove('dxp-active');
       postElement.classList.remove('dxp-selected');
     } else {
       selectedPosts.add(postNumber);
+      selectedPostIds.set(postNumber, postId);
       selectBtn.innerHTML = ICON_CHECKED;
       selectBtn.classList.add('dxp-active');
       postElement.classList.add('dxp-selected');
@@ -216,31 +211,43 @@ export function injectButtonsToPost(postElement: Element): void {
 
 // ==================== Patrol ====================
 
-function scanAndInject(): void {
-  for (const sel of VIEW_SELECTORS) {
-    const posts = document.querySelectorAll(sel.postContainer);
-    posts.forEach((post) => injectButtonsToPost(post));
+function scanAndInject(root: ParentNode = document): void {
+  for (const selector of VIEW_SELECTORS) {
+    if (root instanceof Element) {
+      const post = root.closest(selector.postContainer);
+      if (post) injectButtonsToPost(post);
+    }
+    root.querySelectorAll(selector.postContainer).forEach(injectButtonsToPost);
   }
 }
 
-export function initFloorButtons(): void {
-  // Initial scan
+/** The topic lifecycle owns this observer and must stop it on departure. */
+export function initFloorButtons(): () => void {
   scanAndInject();
-
-  // MutationObserver for dynamically loaded posts
+  const pendingRoots = new Set<Element>();
+  let scheduled = false;
+  let stopped = false;
   const observer = new MutationObserver((mutations) => {
-    let shouldScan = false;
-    for (const m of mutations) {
-      if (m.addedNodes.length > 0) {
-        shouldScan = true;
-        break;
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node instanceof Element && !node.matches('.dxp-floor-btn')) {
+          pendingRoots.add(node);
+        }
       }
     }
-    if (shouldScan) scanAndInject();
+    if (scheduled || pendingRoots.size === 0) return;
+    scheduled = true;
+    queueMicrotask(() => {
+      scheduled = false;
+      if (stopped) return;
+      for (const root of pendingRoots) scanAndInject(root);
+      pendingRoots.clear();
+    });
   });
-
   observer.observe(document.body, { childList: true, subtree: true });
-
-  // Backup patrol every 1s
-  setInterval(scanAndInject, 1000);
+  return () => {
+    stopped = true;
+    observer.disconnect();
+    pendingRoots.clear();
+  };
 }

@@ -23,11 +23,13 @@ src/
 - `src/main.ts` 只应负责 userscript 启动、Discourse 页面检测、注册菜单、启动运行时生命周期、初始化 UI、把 UI 回调连接到用例函数。
 - `src/runtime/topic-lifecycle.ts` 负责 `/t/...`、`/nested/...` 话题身份检测、SPA 话题激活、标题按钮补注入、话题级状态重置和按话题 ID 去重的被动检查触发。
 - `src/core/topic-export.ts` 是完整话题导出的用例入口，负责组合 `fetchTopic`、`fetchAllPosts`、`resolveUploadUrls`、`processPost` 和 `assembleDocument`。
-- `src/core/single-post-export.ts` 是单楼层 Markdown 构建用例，负责获取话题/楼层数据、解析 `upload://`，并选择 raw pipeline 或 cooked fallback。
+- `src/core/single-post-export.ts` 是单楼层 Markdown 构建用例，负责获取话题/楼层数据、解析 `upload://`，并调用统一的 `post-content.ts` 正文规则。
+- `src/core/post-content.ts` 是单楼与整帖共用正文入口，拥有 raw 优先与可观察降级语义；`core/cooked-fallback.ts` 拥有共享 Onebox 提取/呈现。
 - `src/core/raw-pipeline.ts` 负责 raw Markdown 转换。不要在这里做导出模式相关的图片路径改写。
 - `src/export/topic-delivery.ts` 负责 Markdown、ZIP、Obsidian 话题交付的完整目的地操作。入口不应按图片收集、上传、改写、写入这些底层步骤拼流程。
 - `src/export/obsidian-batch.ts` 负责 Obsidian 已导出笔记扫描和批量重导。UI 只触发回调和展示进度。
-- `src/export/image-assets.ts` 负责图片收集、下载、上传、ZIP 路径和 Obsidian wikilink 改写。
+- `src/export/image-assets.ts` 负责图片物化、内容地址及图片链接改写；`export/paths.ts` 拥有站点身份与目录，`export/topic-links.ts` 拥有实际跨笔记引用。
+- `src/utils/markdown-code.ts` 与 `markdown-links.ts` 提供正文和附件共用的代码保护、链接识别边界。
 - `src/export/obsidian-api.ts` 是 Obsidian Local REST API 边界，负责 URL 校验、鉴权 header、vault path 编码和 GM 请求。
 - `src/ui/*` 只处理 DOM 构建、事件绑定、用户输入和展示状态。导出逻辑、Discourse API、Markdown 转换不得塞进 UI 文件。
 - `src/utils/*` 只放有清晰领域含义的函数，例如 `safeFilename`、`topicUrl`、`sleepRandom`。不要创建含糊的 `utils` 聚合文件或 `helper` 命名。

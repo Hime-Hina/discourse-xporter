@@ -6,15 +6,27 @@ import {
   parseDetailsTag,
 } from '../utils/bbcode';
 import { replaceEmoji } from './emoji-map';
-import { cookedToMarkdown } from './cooked-fallback';
-import { resolveUrl, topicUrl } from '../utils/url';
+import {
+  cookedToMarkdown,
+  renderOnebox,
+  renderInlineOnebox,
+} from './cooked-fallback';
+import { resolveUrl } from '../utils/url';
+import { floorLink } from '../utils/obsidian';
+import {
+  protectMarkdownCode,
+  transformOutsideCode,
+} from '../utils/markdown-code';
+import type { SourceRange } from '../utils/bbcode';
 
 /**
  * Process raw Markdown through the full transformation pipeline.
  * Steps are applied sequentially.
  */
 export function processRaw(raw: string, ctx: PipelineContext): string {
-  let text = raw;
+  const code = protectMarkdownCode(raw);
+  let text = code.text;
+  const cookedDocument = parseCookedDocument(ctx.cookedHtml);
 
   // 1. Resolve upload:// short URLs
   text = resolveUploadShortUrls(text, ctx.uploadMap);
@@ -38,10 +50,10 @@ export function processRaw(raw: string, ctx: PipelineContext): string {
   text = replaceEmoji(text);
 
   // 8. Onebox: bare URL → titled link (using cooked data)
-  text = transformOneboxes(text, ctx);
+  text = transformOneboxes(text, ctx, cookedDocument);
 
   // 9. Quote preview: bare site URL → callout (using cooked data)
-  text = transformQuotePreviews(text, ctx);
+  text = transformQuotePreviews(text, ctx, cookedDocument);
 
   // 10. Re-resolve relative links that steps 8/9 may have introduced
   //     (turndown of cooked HTML can produce relative links like /t/slug/123)
@@ -56,7 +68,7 @@ export function processRaw(raw: string, ctx: PipelineContext): string {
   // 12. Make block/media boundaries explicit for Obsidian rendering.
   text = normalizeObsidianSpacing(text);
 
-  return text;
+  return code.restore(text);
 }
 
 // ==================== Step 1: Upload URLs ====================
@@ -71,7 +83,7 @@ export function resolveUploadShortUrls(
     const escaped = shortUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     text = text.replace(
       new RegExp(escaped + '(?:\\.[a-zA-Z0-9]+)?', 'g'),
-      fullUrl,
+      () => fullUrl,
     );
   }
   return text;
@@ -90,52 +102,45 @@ export function resolveRelativeLinks(text: string, origin: string): string {
 
 // ==================== Step 3: Quotes ====================
 
+const MAX_BBCODE_DEPTH = 64;
+
 export function transformQuotes(text: string, ctx: PipelineContext): string {
-  // Recursive: process outermost quotes, then re-process in case of nesting
-  let result = text;
-  let maxIter = 10; // prevent infinite loops
+  return transformOutsideCode(text, (prose) => renderQuotes(prose, ctx, 0));
+}
 
-  while (maxIter-- > 0) {
-    const quotes = parseQuoteTag(result);
-    if (quotes.length === 0) break;
-
-    for (const { params, content, fullMatch } of quotes) {
-      const { username, post, topic } = params;
-
-      // Build callout header
-      let header = `> [!quote] @${username}`;
-      if (post !== null) {
-        const tid = topic ?? ctx.topicId;
-        if (tid === ctx.topicId) {
-          // Same topic: use block ref for Obsidian cross-reference
-          header += ` · [[#^floor-${post}|#${post}]]`;
-        } else {
-          const url = topicUrl(ctx.origin, tid, post);
-          header += ` · [#${post}](${url})`;
-        }
-      }
-
-      // Process content: add `> ` prefix to each line
-      const quotedContent = content
-        .trim()
-        .split('\n')
-        .map((line) => `> ${line}`)
-        .join('\n');
-
-      result = replaceAllLiteral(result, fullMatch, `${header}\n${quotedContent}`);
-    }
+function renderQuotes(
+  text: string,
+  ctx: PipelineContext,
+  depth: number,
+): string {
+  const quotes = parseQuoteTag(text);
+  if (quotes.length === 0) return text;
+  if (depth >= MAX_BBCODE_DEPTH) {
+    console.warn(
+      '[DXP] Quote nesting exceeds 64 levels; preserving remaining source',
+    );
+    return text;
   }
-
-  return result;
+  return replaceSourceRanges(text, quotes, ({ params, content }) => {
+    const { username, post, topic } = params;
+    let header = `> [!quote]${username ? ` @${username}` : ''}`;
+    if (post !== null) {
+      const tid = topic ?? ctx.topicId;
+      header += ` · ${floorLink(ctx.origin, tid, post, tid === ctx.topicId ? ctx.renderedPostNumbers : undefined)}`;
+    }
+    const body = renderQuotes(content, ctx, depth + 1).trim();
+    return `${header}\n${body
+      .split('\n')
+      .map((line) => `> ${line}`)
+      .join('\n')}`;
+  });
 }
 
 // ==================== Step 4: Polls ====================
 
 export function transformPolls(text: string, ctx: PipelineContext): string {
   const polls = parsePollTag(text);
-  let result = text;
-
-  for (const { params, fullMatch } of polls) {
+  return replaceSourceRanges(text, polls, ({ params }) => {
     // Find matching JSON poll data by name
     const jsonPoll = ctx.polls.find((p) => p.name === params.name);
 
@@ -155,77 +160,108 @@ export function transformPolls(text: string, ctx: PipelineContext): string {
       const statusText = jsonPoll.status === 'closed' ? '已关闭' : '进行中';
       const footer = `\n\n*投票人数: ${jsonPoll.voters} · 状态: ${statusText}*`;
 
-      result = replaceAllLiteral(result, fullMatch, `\n\n${table}${footer}\n\n`);
+      return `\n\n${table}${footer}\n\n`;
     } else {
       // No JSON data — render raw options as a list
       const list = params.options.map((opt) => `- ${opt}`).join('\n');
-      result = replaceAllLiteral(result, fullMatch, `\n\n**投票**\n\n${list}\n\n`);
+      return `\n\n**投票**\n\n${list}\n\n`;
     }
-  }
-
-  return result;
+  });
 }
 
 // ==================== Step 5: Dates ====================
 
 export function transformDates(text: string): string {
-  const dates = parseDateTag(text);
-  let result = text;
-
-  for (const { params, fullMatch } of dates) {
+  return replaceSourceRanges(text, parseDateTag(text), ({ params }) => {
     let formatted = params.date;
     if (params.time) {
-      // Trim seconds if format doesn't need them
-      const timePart = params.time.replace(/:\d{2}$/, '');
+      const timePart = /^\d{2}:\d{2}:\d{2}$/.test(params.time)
+        ? params.time.slice(0, 5)
+        : params.time;
       formatted += ` ${timePart}`;
     }
-    if (params.timezone) {
-      formatted += ` (${params.timezone})`;
-    }
-    result = replaceAllLiteral(result, fullMatch, formatted);
-  }
-
-  return result;
+    if (params.timezone) formatted += ` (${params.timezone})`;
+    return formatted;
+  });
 }
 
 // ==================== Step 6: Details ====================
 
 export function transformDetails(text: string): string {
-  let result = text;
-  let maxIter = 10;
+  return transformOutsideCode(text, (prose) =>
+    transformHtmlDetails(renderDetails(prose, 0)),
+  );
+}
 
-  while (maxIter-- > 0) {
-    const details = parseDetailsTag(result);
-    if (details.length === 0) break;
-
-    for (const { params, fullMatch } of details) {
-      const header = `> [!note]- ${params.title}`;
-      const quotedContent = params.content
-        .trim()
-        .split('\n')
-        .map((line) => `> ${line}`)
-        .join('\n');
-
-      result = replaceAllLiteral(result, fullMatch, `${header}\n${quotedContent}`);
-    }
+function renderDetails(text: string, depth: number): string {
+  const details = parseDetailsTag(text);
+  if (details.length === 0) return text;
+  if (depth >= MAX_BBCODE_DEPTH) {
+    console.warn(
+      '[DXP] Details nesting exceeds 64 levels; preserving remaining source',
+    );
+    return text;
   }
-
-  return transformHtmlDetails(result);
+  return replaceSourceRanges(text, details, ({ params }) => {
+    const body = renderDetails(params.content, depth + 1).trim();
+    return `> [!note]- ${params.title}\n${body
+      .split('\n')
+      .map((line) => `> ${line}`)
+      .join('\n')}`;
+  });
 }
 
 export function transformHtmlDetails(text: string): string {
-  return text.replace(
-    /<details>\s*<summary>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi,
-    (_fullMatch: string, summaryHtml: string, bodyHtml: string) => {
-      const title = htmlFragmentToMarkdown(summaryHtml)
+  const tags = /<details\b[^>]*>|<\/details\s*>/gi;
+  const ranges: (SourceRange & {
+    opening: string;
+    content: string;
+    fullMatch: string;
+  })[] = [];
+  let outer:
+    | { start: number; contentStart: number; opening: string }
+    | undefined;
+  let depth = 0;
+  let token: RegExpExecArray | null;
+  while ((token = tags.exec(text))) {
+    if (!/^<\//.test(token[0])) {
+      if (depth === 0)
+        outer = {
+          start: token.index,
+          contentStart: tags.lastIndex,
+          opening: token[0],
+        };
+      depth++;
+    } else if (depth > 0 && --depth === 0 && outer) {
+      ranges.push({
+        startIndex: outer.start,
+        endIndex: tags.lastIndex,
+        opening: outer.opening,
+        content: text.slice(outer.contentStart, token.index),
+        fullMatch: text.slice(outer.start, tags.lastIndex),
+      });
+      outer = undefined;
+    }
+  }
+  return replaceSourceRanges(
+    text,
+    ranges,
+    ({ content, opening, fullMatch }) => {
+      // Nested HTML details are retained intact rather than partially truncating them.
+      if (/<details\b/i.test(content)) return fullMatch;
+      const summary = content.match(
+        /^\s*<summary\b[^>]*>([\s\S]*?)<\/summary\s*>([\s\S]*)$/i,
+      );
+      if (!summary) return fullMatch;
+      const title = htmlFragmentToMarkdown(summary[1])
         .replace(/\s+/g, ' ')
         .trim();
-      const body = htmlFragmentToMarkdown(bodyHtml).trim();
-      const quotedBody = body
+      const body = htmlFragmentToMarkdown(summary[2]).trim();
+      const expanded = /\sopen(?:\s|=|>)/i.test(opening);
+      return `> [!note]${expanded ? '+' : '-'} ${title}\n${body
         .split('\n')
         .map((line) => `> ${line}`)
-        .join('\n');
-      return `> [!note]- ${title}\n${quotedBody}`;
+        .join('\n')}`;
     },
   );
 }
@@ -245,61 +281,33 @@ function htmlFragmentToMarkdown(fragment: string): string {
  * 1. Full onebox (aside.onebox) — header.source + article.onebox-body + div.onebox-metadata → callout
  * 2. Inline onebox (a.inline-onebox) — link text replaced with page title → titled link
  */
+function parseCookedDocument(cookedHtml: string): Document | undefined {
+  if (!cookedHtml || typeof DOMParser === 'undefined') return undefined;
+  return new DOMParser().parseFromString(cookedHtml, 'text/html');
+}
+
 export function extractOneboxes(cookedHtml: string): Map<string, OneboxInfo> {
+  return oneboxesFromDocument(parseCookedDocument(cookedHtml));
+}
+
+function oneboxesFromDocument(
+  document?: Document,
+  ctx?: PipelineContext,
+): Map<string, OneboxInfo> {
   const map = new Map<string, OneboxInfo>();
-  if (!cookedHtml) return map;
-
-  const parser = typeof DOMParser !== 'undefined' ? new DOMParser() : null;
-  if (!parser) return map;
-
-  const doc = parser.parseFromString(cookedHtml, 'text/html');
-
-  // 1. Full onebox: aside.onebox → callout
-  const oneboxes = doc.querySelectorAll('aside.onebox');
-  for (const aside of oneboxes) {
-    let url = aside.getAttribute('data-onebox-src') ?? '';
-    if (!url) {
-      const headerLink = aside.querySelector(
-        'header a[href]',
-      ) as HTMLAnchorElement | null;
-      url = headerLink?.getAttribute('href') ?? '';
-    }
-    if (!url) continue;
-
-    // Convert each section to Markdown via turndown
-    const headerEl = aside.querySelector('header.source');
-    const bodyEl = aside.querySelector('article.onebox-body');
-    const metaEl = aside.querySelector('div.onebox-metadata');
-
-    const headerMd = headerEl
-      ? cookedToMarkdown(headerEl.innerHTML).trim()
-      : '';
-    const bodyMd = bodyEl ? cookedToMarkdown(bodyEl.innerHTML).trim() : '';
-    const metaMd = metaEl ? cookedToMarkdown(metaEl.innerHTML).trim() : '';
-
-    // Build callout: header as callout title, body + metadata as content
-    const lines: string[] = [];
-    lines.push(`> [!link] ${headerMd || url}`);
-    if (bodyMd) {
-      for (const line of bodyMd.split('\n')) lines.push(`> ${line}`);
-    }
-    if (metaMd) {
-      for (const line of metaMd.split('\n')) lines.push(`> ${line}`);
-    }
-
-    map.set(url, { url, rendered: lines.join('\n') });
+  if (!document) return map;
+  for (const element of document.querySelectorAll('aside.onebox')) {
+    const onebox = renderOnebox(
+      element,
+      (html) => cookedToMarkdown(html, ctx),
+      ctx?.origin,
+    );
+    if (onebox) map.set(onebox.url, onebox);
   }
-
-  // 2. Inline onebox: a.inline-onebox → titled link
-  const inlineOneboxes = doc.querySelectorAll('a.inline-onebox');
-  for (const a of inlineOneboxes) {
-    const url = a.getAttribute('href') ?? '';
-    const title = a.textContent?.trim();
-    if (url && title && !map.has(url)) {
-      map.set(url, { url, rendered: `[${title}](${url})` });
-    }
+  for (const element of document.querySelectorAll('a.inline-onebox')) {
+    const onebox = renderInlineOnebox(element, ctx?.origin);
+    if (onebox && !map.has(onebox.url)) map.set(onebox.url, onebox);
   }
-
   return map;
 }
 
@@ -315,14 +323,21 @@ function normalizeUrlForMatch(url: string): string {
   }
 }
 
-export function transformOneboxes(text: string, ctx: PipelineContext): string {
-  const oneboxMap = extractOneboxes(ctx.cookedHtml);
+export function transformOneboxes(
+  text: string,
+  ctx: PipelineContext,
+  document = parseCookedDocument(ctx.cookedHtml),
+): string {
+  const oneboxMap = oneboxesFromDocument(document, ctx);
   if (oneboxMap.size === 0) return text;
 
   // Build a normalized URL → OneboxInfo lookup
   const normalizedMap = new Map<string, OneboxInfo>();
   for (const [url, onebox] of oneboxMap) {
-    normalizedMap.set(normalizeUrlForMatch(resolveUrl(url, ctx.origin)), onebox);
+    normalizedMap.set(
+      normalizeUrlForMatch(resolveUrl(url, ctx.origin)),
+      onebox,
+    );
   }
 
   // Replace bare URLs that appear on their own line
@@ -344,13 +359,15 @@ export function transformOneboxes(text: string, ctx: PipelineContext): string {
 export function extractQuotePreviews(
   cookedHtml: string,
 ): Map<string, QuotePreviewInfo> {
+  return quotePreviewsFromDocument(parseCookedDocument(cookedHtml));
+}
+
+function quotePreviewsFromDocument(
+  doc?: Document,
+  ctx?: PipelineContext,
+): Map<string, QuotePreviewInfo> {
   const map = new Map<string, QuotePreviewInfo>();
-  if (!cookedHtml) return map;
-
-  const parser = typeof DOMParser !== 'undefined' ? new DOMParser() : null;
-  if (!parser) return map;
-
-  const doc = parser.parseFromString(cookedHtml, 'text/html');
+  if (!doc) return map;
 
   const quoteAsides = doc.querySelectorAll('aside.quote.quote-modified');
   for (const aside of quoteAsides) {
@@ -375,7 +392,7 @@ export function extractQuotePreviews(
     // Extract blockquote body as Markdown via turndown
     const blockquote = aside.querySelector('blockquote');
     const bodyMd = blockquote
-      ? cookedToMarkdown(blockquote.innerHTML).trim()
+      ? cookedToMarkdown(blockquote.innerHTML, ctx).trim()
       : '';
 
     // Build the source URL from data attributes if not available from link
@@ -397,14 +414,18 @@ export function extractQuotePreviews(
 export function transformQuotePreviews(
   text: string,
   ctx: PipelineContext,
+  document = parseCookedDocument(ctx.cookedHtml),
 ): string {
-  const previewMap = extractQuotePreviews(ctx.cookedHtml);
+  const previewMap = quotePreviewsFromDocument(document, ctx);
   if (previewMap.size === 0) return text;
 
   // Build a normalized lookup
   const normalizedMap = new Map<string, QuotePreviewInfo>();
   for (const [url, preview] of previewMap) {
-    normalizedMap.set(normalizeUrlForMatch(resolveUrl(url, ctx.origin)), preview);
+    normalizedMap.set(
+      normalizeUrlForMatch(resolveUrl(url, ctx.origin)),
+      preview,
+    );
   }
 
   // Replace bare URLs that match quote previews
@@ -421,13 +442,12 @@ export function transformQuotePreviews(
     }
 
     // Build floor reference
-    let floorRef: string;
-    if (preview.topicId === ctx.topicId) {
-      floorRef = `[[#^floor-${preview.postNumber}|#${preview.postNumber}]]`;
-    } else {
-      const url = topicUrl(ctx.origin, preview.topicId, preview.postNumber);
-      floorRef = `[#${preview.postNumber}](${url})`;
-    }
+    const floorRef = floorLink(
+      ctx.origin,
+      preview.topicId,
+      preview.postNumber,
+      preview.topicId === ctx.topicId ? ctx.renderedPostNumbers : undefined,
+    );
     header += ` · ${floorRef}`;
 
     // Build quoted body
@@ -460,51 +480,24 @@ function replaceBareDiscourseLinks(
 // ==================== Obsidian spacing normalization ====================
 
 export function normalizeObsidianSpacing(text: string): string {
-  if (!text) return text;
-
-  const lines = text.split('\n');
-  const out: string[] = [];
-  let inFence = false;
-  let fenceMarker = '';
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const fence = line.match(/^ {0,3}(```+|~~~+)/);
-
-    if (fence) {
-      if (!inFence) {
-        inFence = true;
-        fenceMarker = fence[1][0];
-      } else if (fence[1][0] === fenceMarker) {
-        inFence = false;
-        fenceMarker = '';
-      }
+  return transformOutsideCode(text, (prose) => {
+    const lines = prose.split('\n');
+    const out: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (startsStandaloneBlock(line) && needsBlankBefore(out, line))
+        out.push('');
       out.push(line);
-      continue;
+      const next = lines[i + 1];
+      if (
+        next !== undefined &&
+        endsStandaloneBlock(line, next) &&
+        next.trim() !== ''
+      )
+        out.push('');
     }
-
-    if (inFence) {
-      out.push(line);
-      continue;
-    }
-
-    if (startsStandaloneBlock(line) && needsBlankBefore(out, line)) {
-      out.push('');
-    }
-
-    out.push(line);
-
-    const next = lines[i + 1];
-    if (
-      next !== undefined &&
-      endsStandaloneBlock(line, next) &&
-      next.trim() !== ''
-    ) {
-      out.push('');
-    }
-  }
-
-  return out.join('\n').replace(/\n{3,}/g, '\n\n');
+    return out.join('\n').replace(/\n{3,}/g, '\n\n');
+  });
 }
 
 function startsStandaloneBlock(line: string): boolean {
@@ -540,10 +533,8 @@ function isStandaloneImageLine(line: string): boolean {
 // ==================== Link label escaping ====================
 
 export function escapeBracketedLinkLabels(text: string): string {
-  if (!text) return text;
-
-  return transformOutsideFences(text, (line) =>
-    line.replace(
+  return transformOutsideCode(text, (prose) =>
+    prose.replace(
       /(^|[^!\\])\[\[([^\]\n]+)\]\]\(([^)\s]+)\)/g,
       (_, prefix: string, label: string, href: string) =>
         `${prefix}[\\[${label}\\]](${href})`,
@@ -551,37 +542,16 @@ export function escapeBracketedLinkLabels(text: string): string {
   );
 }
 
-function transformOutsideFences(
+function replaceSourceRanges<T extends SourceRange>(
   text: string,
-  transformLine: (line: string) => string,
+  ranges: T[],
+  render: (range: T) => string,
 ): string {
-  const lines = text.split('\n');
-  let inFence = false;
-  let fenceMarker = '';
-
-  return lines
-    .map((line) => {
-      const fence = line.match(/^ {0,3}(```+|~~~+)/);
-      if (fence) {
-        if (!inFence) {
-          inFence = true;
-          fenceMarker = fence[1][0];
-        } else if (fence[1][0] === fenceMarker) {
-          inFence = false;
-          fenceMarker = '';
-        }
-        return line;
-      }
-
-      return inFence ? line : transformLine(line);
-    })
-    .join('\n');
-}
-
-function replaceAllLiteral(
-  text: string,
-  search: string,
-  replacement: string,
-): string {
-  return search ? text.split(search).join(replacement) : text;
+  let output = '';
+  let cursor = 0;
+  for (const range of ranges) {
+    output += text.slice(cursor, range.startIndex) + render(range);
+    cursor = range.endIndex;
+  }
+  return output + text.slice(cursor);
 }

@@ -1,3 +1,4 @@
+import { transformOutsideCode } from '../utils/markdown-code';
 export const EMOJI_MAP: Record<string, string> = {
   // 笑脸表情
   grinning_face: '😀',
@@ -382,28 +383,10 @@ export const EMOJI_MAP: Record<string, string> = {
 };
 
 export function replaceEmoji(text: string): string {
-  const codeBlocks: string[] = [];
-  const placeholder = (i: number) => `\x00CB${i}\x00`;
-
-  // 1. Extract fenced code blocks and inline code
-  let processed = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, (match) => {
-    codeBlocks.push(match);
-    return placeholder(codeBlocks.length - 1);
-  });
-
-  // 2. Replace :shortcode: patterns
-  processed = processed.replace(
-    /:([a-zA-Z0-9_+\-]+):/g,
-    (match, code: string) => {
-      return EMOJI_MAP[code] ?? match;
-    },
+  return transformOutsideCode(text, (prose) =>
+    prose.replace(
+      /:([a-zA-Z0-9_+\-]+):/g,
+      (match, code: string) => EMOJI_MAP[code] ?? match,
+    ),
   );
-
-  // 3. Restore code blocks
-  processed = processed.replace(
-    /\x00CB(\d+)\x00/g,
-    (_, i) => codeBlocks[Number(i)],
-  );
-
-  return processed;
 }

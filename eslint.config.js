@@ -6,7 +6,12 @@ export default tseslint.config(
   },
   ...tseslint.configs.recommended,
   {
-    files: ['src/**/*.ts', 'vite.config.ts'],
+    files: [
+      'src/**/*.ts',
+      'test/**/*.ts',
+      'vite.config.ts',
+      'vitest.config.ts',
+    ],
     rules: {
       'no-undef': 'off',
       '@typescript-eslint/no-explicit-any': 'error',

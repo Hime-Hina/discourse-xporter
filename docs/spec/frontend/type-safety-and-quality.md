@@ -11,6 +11,8 @@ pnpm run build
 pnpm run lint
 ```
 
+类型与 lint 检查覆盖 `src/`、`test/`、`vite.config.ts` 和 `vitest.config.ts`。CI 固定 Node 24，并从 package.json 安装 pnpm 10.20.0，使用 frozen-lockfile。安装、发布与权限的入口见根目录 README。
+
 `vite build` 不能替代 `tsc --noEmit`。Vite 可能构建成功，但 TypeScript 静态检查仍能发现真实边界错误。
 
 ## 禁止新增 `any`
