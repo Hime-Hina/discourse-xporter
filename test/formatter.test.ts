@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import type { DiscoursePost, PipelineContext, ProcessedPost } from '../src/types';
+import type { DiscoursePost, ProcessedPost } from '../src/types';
+import type { PostContentContext } from '../src/core/post-content';
 import {
   assembleDocument,
   buildFrontmatter,
@@ -10,6 +11,8 @@ import {
 import type { FrontmatterData, TemplateVars } from '../src/core/formatter';
 import { DEFAULTS } from '../src/config/defaults';
 import { FORMAT_VERSION } from '../src/config/format-version';
+import { getRenderedPostNumbers } from '../src/utils/obsidian';
+import { buildExportProfile } from '../src/core/export-profile';
 
 function mockPost(overrides: Partial<ProcessedPost> = {}): ProcessedPost {
   return {
@@ -34,7 +37,47 @@ function mockPost(overrides: Partial<ProcessedPost> = {}): ProcessedPost {
 }
 
 describe('buildFrontmatter', () => {
+  it.each(['null', 'true', '123', '2026-01-01', '- item', '"quoted"', '\\path\\file', 'first\nsecond', '', '\u0085\u2028\u2029'])(
+    'preserves text scalar values and types for %j',
+    (value) => {
+      const frontmatter = buildFrontmatter({
+        title: value,
+        source: value,
+        author: value,
+        category: value,
+        forum: value,
+        tags: [value],
+        created: value,
+        exported: value,
+        topic_id: 123,
+        slug: value,
+        posts_count: 10,
+        reply_count: 8,
+        views: 500,
+        likes: 42,
+        word_count: 3000,
+        participants: 5,
+        closed: true,
+        archived: true,
+        xporter_version: 2,
+      });
+      for (const field of ['title', 'source', 'author', 'category', 'forum', 'slug', 'created', 'exported']) {
+        const line = frontmatter.split('\n').find((entry) => entry.startsWith(`${field}: `));
+        expect(line).toBeDefined();
+        expect(JSON.parse(line!.slice(field.length + 2))).toBe(value);
+      }
+      const tag = frontmatter.split('\n').find((entry) => entry.startsWith('  - '));
+      expect(JSON.parse(tag!.slice(4))).toBe(value);
+      expect(frontmatter).toContain('topic_id: 123\n');
+      expect(frontmatter).toContain('xporter_version: 2\n');
+      expect(frontmatter).toContain('posts_count: 10\n');
+      expect(frontmatter).toContain('closed: true\n');
+      expect(frontmatter).toContain('archived: true\n');
+    },
+  );
+
   it('generates valid YAML with all fields', () => {
+    const profile = buildExportProfile({ ...DEFAULTS, obsApiKey: 'SYNTHETIC_KEY' });
     const data: FrontmatterData = {
       title: 'Test Topic',
       source: 'https://example.com/t/test-topic/123',
@@ -55,25 +98,29 @@ describe('buildFrontmatter', () => {
       closed: false,
       archived: false,
       xporter_version: FORMAT_VERSION,
+      export_profile: profile,
     };
     const result = buildFrontmatter(data);
     expect(result).toContain('---');
     expect(result).toContain(`xporter_version: ${FORMAT_VERSION}`);
-    expect(result).toContain('title: Test Topic');
+    expect(result).toContain('title: "Test Topic"');
     expect(result).toContain('source: "https://example.com/t/test-topic/123"');
-    expect(result).toContain('author: alice');
-    expect(result).toContain('category: General');
-    expect(result).toContain('forum: LINUX DO');
-    expect(result).toContain('  - tag1');
-    expect(result).toContain('  - tag2');
+    expect(result).toContain('author: "alice"');
+    expect(result).toContain('category: "General"');
+    expect(result).toContain('forum: "LINUX DO"');
+    expect(result).toContain('  - "tag1"');
+    expect(result).toContain('  - "tag2"');
     expect(result).toContain('topic_id: 123');
-    expect(result).toContain('slug: test-topic');
+    expect(result).toContain('slug: "test-topic"');
     expect(result).toContain('posts_count: 10');
     expect(result).toContain('reply_count: 8');
     expect(result).toContain('views: 500');
     expect(result).toContain('likes: 42');
     expect(result).toContain('word_count: 3000');
     expect(result).toContain('participants: 5');
+    const profileLine = result.split('\n').find((line) => line.startsWith('export_profile: '));
+    expect(JSON.parse(profileLine!.slice('export_profile: '.length))).toEqual(profile);
+    expect(result).not.toContain('SYNTHETIC_KEY');
     // closed/archived false → should not appear
     expect(result).not.toContain('closed');
     expect(result).not.toContain('archived');
@@ -138,6 +185,18 @@ describe('buildFrontmatter', () => {
 });
 
 describe('renderTemplate', () => {
+  it('inserts body and author values once without interpreting their placeholders', () => {
+    const content = 'Code: `{{content}}`, `{{highlight}}`, `{{solution_badge}}`, `{{block_ref}}`; $& $` $\'';
+    const vars = buildTemplateVars(
+      mockPost({ content, name: '{{date}} {{content}}' }),
+      'https://example.com',
+      123,
+    );
+
+    expect(renderTemplate('{{author}}\n{{content}}\n{{content}}\n{{unknown}}', vars))
+      .toBe(`{{date}} {{content}}\n${content}\n${content}\n{{unknown}}`);
+  });
+
   it('replaces all template variables', () => {
     const template = '## #{{post_number}} by {{author_full}} on {{date}}';
     const vars: TemplateVars = {
@@ -334,13 +393,9 @@ describe('processPost', () => {
       user_title: null,
       post_url: '/t/topic/123/1',
     } as DiscoursePost;
-    const ctx: PipelineContext = {
+    const ctx: PostContentContext = {
       origin: 'https://example.com',
       topicId: 123,
-      topicSlug: 'topic',
-      polls: [],
-      cookedHtml: post.cooked,
-      config: { ...DEFAULTS },
       uploadMap: new Map(),
     };
 
@@ -349,6 +404,48 @@ describe('processPost', () => {
 });
 
 describe('assembleDocument solved metadata', () => {
+  it('uses the source page when a reply or answer floor was filtered out', () => {
+    const document = assembleDocument(
+      '---\ntopic_id: 123\n---',
+      [mockPost({ post_number: 1, reply_to_post_number: 5 })],
+      '{{reply_to_display}} {{block_ref}}\n{{content}}\n',
+      'https://example.com',
+      123,
+      5,
+    );
+
+    expect(document).not.toContain('[[#^floor-5');
+    expect(document.match(/\[#5\]\(https:\/\/example.com\/t\/topic\/123\/5\)/g)).toHaveLength(2);
+  });
+
+  it('uses the source page for every navigation when the template omits anchors', () => {
+    const document = assembleDocument(
+      '---\ntopic_id: 123\n---',
+      [
+        mockPost({ post_number: 1, reply_to_post_number: 5 }),
+        mockPost({ post_number: 5, selected: true }),
+      ],
+      '## #{{post_number}}{{reply_to_display}}\n{{content}}\n',
+      'https://example.com',
+      123,
+      5,
+    );
+
+    expect(document).not.toContain('[[#^floor-');
+    expect(document.match(/https:\/\/example.com\/t\/topic\/123\/5/g)).toHaveLength(3);
+  });
+
+  it.each([
+    '`{{block_ref}}`\n',
+    '~~~~\n{{block_ref}}\n~~~~\n',
+    '    {{block_ref}}\n',
+    '<!--\n{{block_ref}}\n-->\n',
+    '\\{{block_ref}}\n',
+    'prefix{{block_ref}}\n',
+  ])('does not treat code or escaped block references as emitted anchors: %j', (template) => {
+    expect([...getRenderedPostNumbers([1, 5], template)]).toEqual([]);
+  });
+
   it('adds a first-floor solution link without duplicating accepted answer body', () => {
     const document = assembleDocument(
       '---\ntopic_id: 123\n---',

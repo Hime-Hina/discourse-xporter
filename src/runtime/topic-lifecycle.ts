@@ -21,9 +21,12 @@ export function detectTopicIdentity(
   const topicPath = pathname.match(/^\/(t|nested)\/[^/]+\/(\d+)(?:\/|$)/);
   if (!topicPath) return null;
 
+  const topicId = Number(topicPath[2]);
+  if (!Number.isSafeInteger(topicId) || topicId <= 0) return null;
+
   return {
     isNested: topicPath[1] === 'nested',
-    topicId: Number(topicPath[2]),
+    topicId,
   };
 }
 
@@ -86,12 +89,56 @@ export function startTopicLifecycle(
     checkOutdatedTopicOnce(topicIdentity.topicId);
   }
 
-  const observer = new MutationObserver(refresh);
+  let stopped = false;
+  let scheduled = false;
+  function scheduleRefresh(): void {
+    if (scheduled || stopped) return;
+    scheduled = true;
+    queueMicrotask(() => {
+      scheduled = false;
+      if (!stopped) refresh();
+    });
+  }
+  const history = window.history;
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+  const pushState: History['pushState'] = function (this: History, ...args) {
+    originalPushState.apply(this, args);
+    scheduleRefresh();
+  };
+  const replaceState: History['replaceState'] = function (
+    this: History,
+    ...args
+  ) {
+    originalReplaceState.apply(this, args);
+    scheduleRefresh();
+  };
+  history.pushState = pushState;
+  history.replaceState = replaceState;
+  window.addEventListener('popstate', scheduleRefresh);
+  window.addEventListener('hashchange', scheduleRefresh);
+  // Prefer the browser route notification when available.
+  const navigation = (window as Window & { navigation?: EventTarget })
+    .navigation;
+  navigation?.addEventListener('navigatesuccess', scheduleRefresh);
+
+  const observer = new MutationObserver(scheduleRefresh);
   observer.observe(document.body, { childList: true, subtree: true });
   refresh();
 
   return {
     refresh,
-    stop: () => observer.disconnect(),
+    stop: () => {
+      stopped = true;
+      observer.disconnect();
+      window.removeEventListener('popstate', scheduleRefresh);
+      window.removeEventListener('hashchange', scheduleRefresh);
+      navigation?.removeEventListener('navigatesuccess', scheduleRefresh);
+      if (history.pushState === pushState)
+        history.pushState = originalPushState;
+      if (history.replaceState === replaceState)
+        history.replaceState = originalReplaceState;
+      if (activeTopicId !== null) callbacks.resetTopicState();
+    },
   };
 }

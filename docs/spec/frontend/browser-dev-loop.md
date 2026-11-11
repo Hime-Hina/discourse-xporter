@@ -78,6 +78,10 @@ Chrome + Tampermonkey 开发验证需要满足：
 
 这是开发环境要求，不应写入生产脚本逻辑。生产脚本是完整打包后的 userscript，不依赖本地 Vite module script。
 
+`mountGmApi` 会将 GM 能力挂到宿主可访问环境，开发模式不具有生产隔离保证。只使用合成数据：开发配置使用独立的 `dxp_dev_config`，不读取或写入生产 `dxp_config`，API Key 在读取和保存时都强制为空。不要把真实密钥放入开发存储或控制台。正式凭据流程和 `@sandbox DOM` 的安全验收必须安装生产构建后单独完成。
+
+开发兼容入口仍只导入 GM bridge 与 main，GET/HEAD/OPTIONS 契约由 `test/build-config.test.ts` 验证，生产构建同时检查不含开发入口、HMR 或开发配置键。升级 vite-plugin-monkey 时，先核对 transformIndexHtml、GM bridge 与 CSP 约束；只有原约束消失并且这些回归通过后，才移除入口接管。
+
 如果浏览器打开了安装确认页，脚本管理器的确认页面可能属于 `chrome-extension://`。自动化工具不一定允许操作该页面；这种情况下由用户手动确认安装或更新脚本。确认完成后再刷新 Discourse 话题页继续验证。
 
 `server:Discourse Xporter` 和正式 `Discourse Xporter` 是脚本管理器里的两条脚本。二者同时启用会在同一页面重复注入 `.dxp-*` UI；浏览器开发时只启用 `server:` 脚本。
@@ -98,7 +102,7 @@ Chrome + Tampermonkey 开发验证需要满足：
 
 ## 导出验证边界
 
-不要把超大公开话题作为完整导出冒烟测试目标。当前 `buildTopicExport()` 会先通过 Discourse API 抓取完整话题，再应用楼层过滤；即使只选中少量楼层，大话题仍会触发完整抓取。
+不要把超大公开话题作为完整导出冒烟测试目标。`buildTopicExport()` 可使用手选楼层已有的稳定 post ID 定向获取，或通过用户名条件缩小候选 ID 集合，再做本地精确筛选；区间、关键词、图片等无法证明等价的条件仍可能需要完整获取。不得把 post number 当成 stream 数组下标，或假定选少量楼层就总是少量请求。
 
 完整导出测试应选择楼层较少、网络状态稳定的话题，或使用已有单元测试覆盖纯转换和边界契约。浏览器冒烟测试默认只验证脚本加载、DOM 注入和轻量交互。
 

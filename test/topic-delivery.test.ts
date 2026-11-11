@@ -1,222 +1,276 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { unzipSync, strFromU8 } from 'fflate';
 import { DEFAULTS } from '../src/config/defaults';
 import type { TopicExportResult } from '../src/core/topic-export';
 import { downloadFile } from '../src/export/download';
 import {
-  buildImageZip,
-  collectImageAssets,
-  downloadImageAssets,
-  downloadZipBytes,
-  rewriteImageUrlsForObsidian,
-  rewriteImageUrlsForZip,
-  stripImages,
-  uploadImageAssets,
-} from '../src/export/image-assets';
-import {
-  openNote,
-  testConnection,
-  writeNote,
-} from '../src/export/obsidian-api';
-import {
   downloadTopicMarkdown,
   downloadTopicZip,
   overwriteTopicObsidianNote,
+  refreshObsidianNoteLinks,
   writeTopicToConfiguredObsidian,
 } from '../src/export/topic-delivery';
-import type {
-  DiscoursePost,
-  DiscourseTopic,
-  ProcessedPost,
-} from '../src/types';
+import { topicPaths } from '../src/export/paths';
+import { exportedNote, installMemoryVault } from './vault-fixture';
 
-vi.mock('../src/export/download', () => ({
-  downloadFile: vi.fn(),
-}));
-
-vi.mock('../src/export/image-assets', () => ({
-  buildImageZip: vi.fn(),
-  collectImageAssets: vi.fn(),
-  downloadImageAssets: vi.fn(),
-  downloadZipBytes: vi.fn(),
-  joinVaultPath: (...parts: string[]) => parts.filter(Boolean).join('/'),
-  resolveImgDir: vi.fn(() => 'Discourse/attachments'),
-  rewriteImageUrlsForObsidian: vi.fn(),
-  rewriteImageUrlsForZip: vi.fn(),
-  stripImages: vi.fn(),
-  uploadImageAssets: vi.fn(),
-}));
-
-vi.mock('../src/export/obsidian-api', () => ({
-  openNote: vi.fn(),
-  testConnection: vi.fn(),
-  writeNote: vi.fn(),
-}));
-
-function topicExportResult(markdown = 'Topic body'): TopicExportResult {
+vi.mock('../src/export/download', () => ({ downloadFile: vi.fn() }));
+const connection = { apiUrl: DEFAULTS.obsApiUrl, apiKey: 'SYNTHETIC_KEY' };
+const settings = {
+  ...DEFAULTS,
+  obsApiKey: connection.apiKey,
+  obsOpenAfterExport: false,
+  imageDelayMin: 0,
+  imageDelayMax: 0,
+  imgMode: 'embed' as const,
+};
+function document(
+  topicId = 10,
+  origin = 'https://forum.example',
+  body = 'body',
+  title = 'Same Title',
+): TopicExportResult {
   return {
-    topic: {} as DiscourseTopic,
-    allPosts: [] as DiscoursePost[],
-    processedPosts: [] as ProcessedPost[],
-    markdown,
-    safeTitle: 'Topic Title',
-    topicId: 123,
+    topicId,
+    origin,
+    safeTitle: title,
+    markdown: exportedNote(topicId, body, origin, title),
   };
 }
 
-beforeEach(() => {
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
-  vi.mocked(buildImageZip).mockReturnValue(new Uint8Array([1, 2, 3]));
-  vi.mocked(collectImageAssets).mockReturnValue(new Map());
-  vi.mocked(downloadImageAssets).mockResolvedValue(new Map());
-  vi.mocked(rewriteImageUrlsForObsidian).mockReturnValue('obsidian markdown');
-  vi.mocked(rewriteImageUrlsForZip).mockReturnValue('zip markdown');
-  vi.mocked(stripImages).mockReturnValue('stripped markdown');
-  vi.mocked(testConnection).mockResolvedValue(true);
-  vi.mocked(uploadImageAssets).mockResolvedValue(undefined);
-  vi.mocked(writeNote).mockResolvedValue(undefined);
-  vi.mocked(openNote).mockResolvedValue(undefined);
 });
 
-describe('topic delivery', () => {
-  it('downloads a Markdown export directly', () => {
-    const exportData = topicExportResult();
-
-    downloadTopicMarkdown(exportData);
-
-    expect(downloadFile).toHaveBeenCalledWith(
-      'Topic body',
-      'Topic Title.md',
-      'text/markdown;charset=utf-8',
+describe('document delivery contracts through real GM and image boundaries', () => {
+  it('separates same titles, sanitized titles and different sites, including attachments', async () => {
+    const vault = installMemoryVault();
+    const documents = [
+      document(10),
+      document(11),
+      document(10, 'https://other.example'),
+    ];
+    for (const entry of documents)
+      await writeTopicToConfiguredObsidian(entry, settings);
+    const paths = documents.map(
+      (entry) =>
+        topicPaths(settings, entry.origin, entry.topicId, entry.safeTitle)
+          .notePath,
     );
+    expect(new Set(paths).size).toBe(3);
+    for (let index = 0; index < paths.length; index++)
+      expect(vault.files.get(paths[index])).toBe(documents[index].markdown);
   });
 
-  it('falls back to a Markdown download when ZIP export has no images', async () => {
-    const delivery = await downloadTopicZip(topicExportResult('No images'), {
-      ...DEFAULTS,
-    });
-
-    expect(delivery).toEqual({ downloadedFileKind: 'markdown' });
-    expect(downloadFile).toHaveBeenCalledWith(
-      'No images',
-      'Topic Title.md',
-      'text/markdown;charset=utf-8',
+  it('keeps the original note path after title changes and rejects occupied foreign paths', async () => {
+    const old = document();
+    const vault = installMemoryVault({ 'Legacy/old-name.md': old.markdown });
+    await writeTopicToConfiguredObsidian(
+      document(10, old.origin, 'updated', 'New Title'),
+      settings,
     );
-    expect(downloadZipBytes).not.toHaveBeenCalled();
-  });
-
-  it('materializes images before downloading a ZIP archive', async () => {
-    const imageAssets = new Map([
-      [
-        'https://cdn.example.com/image.png',
-        {
-          url: 'https://cdn.example.com/image.png',
-          filename: 'image.png',
-        },
-      ],
-    ]);
-    vi.mocked(collectImageAssets).mockReturnValue(imageAssets);
-    vi.mocked(downloadImageAssets).mockResolvedValue(
-      new Map([['image.png', new Uint8Array([9])]]),
-    );
-
-    const delivery = await downloadTopicZip(
-      topicExportResult('![img](https://cdn.example.com/image.png)'),
-      { ...DEFAULTS },
-    );
-
-    expect(delivery).toEqual({ downloadedFileKind: 'zip' });
-    expect(rewriteImageUrlsForZip).toHaveBeenCalledWith(
-      '![img](https://cdn.example.com/image.png)',
-      imageAssets,
-      'Discourse/attachments',
-      123,
-    );
-    expect(buildImageZip).toHaveBeenCalledWith(
-      'zip markdown',
-      'Topic Title',
-      123,
-      expect.any(Object),
-      expect.any(Map),
-    );
-    expect(downloadZipBytes).toHaveBeenCalledWith(
-      new Uint8Array([1, 2, 3]),
-      'Topic Title',
-    );
-  });
-
-  it('rejects configured Obsidian writes without an API key', async () => {
+    expect(String(vault.files.get('Legacy/old-name.md'))).toContain('updated');
+    expect([...vault.files.keys()]).toEqual(['Legacy/old-name.md']);
+    const target = topicPaths(settings, old.origin, 20, 'Same Title').notePath;
+    vault.files.set(target, 'ordinary note owned by the user');
     await expect(
-      writeTopicToConfiguredObsidian(topicExportResult(), {
-        ...DEFAULTS,
-        obsApiKey: '',
+      writeTopicToConfiguredObsidian(document(20), settings),
+    ).rejects.toThrow('Refusing to overwrite');
+    expect(vault.files.get(target)).toBe('ordinary note owned by the user');
+    await expect(
+      overwriteTopicObsidianNote(
+        document(99),
+        settings,
+        connection,
+        'Legacy/old-name.md',
+      ),
+    ).rejects.toThrow('Refusing to overwrite');
+  });
+
+  it('refuses to guess between two saved strategies of the same topic', async () => {
+    installMemoryVault({
+      'first.md': document().markdown,
+      'second.md': document().markdown,
+    });
+    await expect(
+      writeTopicToConfiguredObsidian(document(), settings),
+    ).rejects.toThrow('Multiple exported notes');
+  });
+
+  it('waits for required pictures before writing a note and preserves all old bytes on failure', async () => {
+    const path = topicPaths(
+      settings,
+      'https://forum.example',
+      10,
+      'Same Title',
+    ).notePath;
+    const oldMarkdown = exportedNote(10, '![[old/A.png]]\n![[old/B.png]]');
+    const vault = installMemoryVault({
+      [path]: oldMarkdown,
+      'old/A.png': new Uint8Array([1]),
+      'old/B.png': new Uint8Array([2]),
+    });
+    let release!: (value: Response) => void;
+    const fetch = vi.fn((url: string) =>
+      url.endsWith('new.png')
+        ? new Promise<Response>((resolve) => {
+            release = resolve;
+          })
+        : Promise.resolve(new Response('B')),
+    );
+    vi.stubGlobal('fetch', fetch);
+    const writing = writeTopicToConfiguredObsidian(
+      document(
+        10,
+        'https://forum.example',
+        '![B](https://cdn.example/B.png)\n![new](https://cdn.example/new.png)',
+      ),
+      { ...settings, imgMode: 'file' },
+    );
+    const rejected = expect(writing).rejects.toThrow('Image download failed');
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(
+      vault.requests.filter((request) => request.method === 'PUT'),
+    ).toHaveLength(0);
+    release(new Response('', { status: 404 }));
+    await rejected;
+    expect(vault.files.get(path)).toBe(oldMarkdown);
+    expect(vault.files.get('old/A.png')).toEqual(new Uint8Array([1]));
+    expect(vault.files.get('old/B.png')).toEqual(new Uint8Array([2]));
+  });
+
+  it('delivers content-addressed assets before the note, then skips unchanged writes', async () => {
+    const vault = installMemoryVault();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('image bytes')),
+    );
+    const entry = document(
+      10,
+      'https://forum.example',
+      '![alt](https://cdn.example/image.png)',
+    );
+    expect(
+      await writeTopicToConfiguredObsidian(entry, {
+        ...settings,
+        imgMode: 'file',
       }),
-    ).rejects.toThrow('请先配置 Obsidian API Key');
-
-    expect(testConnection).not.toHaveBeenCalled();
-    expect(writeNote).not.toHaveBeenCalled();
+    ).toEqual({ updated: true });
+    const puts = vault.requests.filter((request) => request.method === 'PUT');
+    expect(puts).toHaveLength(2);
+    expect(puts[0].data).toBeInstanceOf(ArrayBuffer);
+    expect(typeof puts[1].data).toBe('string');
+    const body = String(puts[1].data);
+    expect(body).toMatch(
+      /!\[\[Discourse\/attachments\/https--forum.example\/10\/[a-f0-9]{64}\.png\|alt\]\]/,
+    );
+    const next = {
+      ...entry,
+      markdown: entry.markdown.replace('2026-01-01', '2026-01-02'),
+    };
+    expect(
+      await writeTopicToConfiguredObsidian(next, {
+        ...settings,
+        imgMode: 'file',
+      }),
+    ).toEqual({ updated: false });
+    expect(
+      vault.requests.filter((request) => request.method === 'PUT'),
+    ).toHaveLength(2);
   });
 
-  it('writes stripped Markdown to Obsidian for no-image mode', async () => {
-    await writeTopicToConfiguredObsidian(topicExportResult('![x](url)'), {
-      ...DEFAULTS,
-      obsApiKey: 'secret',
+  it('reports note commit success even when opening Obsidian subsequently fails', async () => {
+    const vault = installMemoryVault();
+    vault.override.handle = (request) => {
+      if (!request.url.includes('/open/')) return false;
+      request.onload({ status: 500, responseText: '' });
+      return true;
+    };
+    expect(
+      await writeTopicToConfiguredObsidian(document(), {
+        ...settings,
+        obsOpenAfterExport: true,
+      }),
+    ).toEqual({
+      updated: true,
+      openFailed: 'Obsidian API open failed: HTTP 500',
+    });
+    expect([...vault.files.values()]).toContain(document().markdown);
+  });
+
+  it('produces portable ZIP entries matching the final rewritten references', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('image')),
+    );
+    const entry = document(
+      10,
+      'https://forum.example',
+      '![image](https://cdn.example/image(2).png "title")',
+    );
+    expect(await downloadTopicZip(entry, settings)).toEqual({
+      downloadedFileKind: 'zip',
+    });
+    const blob = vi.mocked(downloadFile).mock.calls[0][0];
+    expect(blob).toBeInstanceOf(Blob);
+    if (!(blob instanceof Blob)) throw new Error('Expected ZIP blob');
+    const zip = unzipSync(new Uint8Array(await blob.arrayBuffer()));
+    const body = strFromU8(zip['Same Title.md']);
+    const destination = body.match(/!\[image\]\(<([^>]+)>\)/)?.[1];
+    expect(destination).toBeDefined();
+    expect(zip[destination!]).toBeDefined();
+    expect(Object.keys(zip)).toHaveLength(2);
+  });
+
+  it('keeps Markdown source images and removes file-mode images in none mode without touching code', async () => {
+    const entry = document(
+      10,
+      'https://forum.example',
+      '![body](https://cdn.example/image.png)\n`![example](https://cdn.example/code.png)`',
+    );
+    downloadTopicMarkdown(entry);
+    expect(vi.mocked(downloadFile).mock.calls[0][0]).toBe(entry.markdown);
+    const vault = installMemoryVault();
+    await writeTopicToConfiguredObsidian(entry, {
+      ...settings,
       imgMode: 'none',
-      obsOpenAfterExport: true,
     });
-
-    expect(testConnection).toHaveBeenCalledWith({
-      apiUrl: DEFAULTS.obsApiUrl,
-      apiKey: 'secret',
-    });
-    expect(stripImages).toHaveBeenCalledWith('![x](url)');
-    expect(writeNote).toHaveBeenCalledWith(
-      { apiUrl: DEFAULTS.obsApiUrl, apiKey: 'secret' },
-      'Discourse/Topic Title.md',
-      'stripped markdown',
-    );
-    expect(openNote).toHaveBeenCalledWith(
-      { apiUrl: DEFAULTS.obsApiUrl, apiKey: 'secret' },
-      'Discourse/Topic Title.md',
-    );
+    const body = String([...vault.files.values()][0]);
+    expect(body).toContain('\nbody\n`![example]');
+    expect(body).not.toContain('![body]');
   });
 
-  it('uploads file-mode images before overwriting an Obsidian note', async () => {
-    const imageAssets = new Map([
-      [
-        'https://cdn.example.com/image.png',
-        {
-          url: 'https://cdn.example.com/image.png',
-          filename: 'image.png',
-        },
-      ],
-    ]);
-    vi.mocked(collectImageAssets).mockReturnValue(imageAssets);
-
-    await overwriteTopicObsidianNote(
-      topicExportResult('![img](https://cdn.example.com/image.png)'),
-      { ...DEFAULTS, imgMode: 'file' },
-      { apiUrl: DEFAULTS.obsApiUrl, apiKey: 'secret' },
-      'Discourse/Existing.md',
+  it('refreshes links only in selected exported notes and leaves unrelated vault files unchanged', async () => {
+    const a = document(
+      10,
+      'https://forum.example',
+      '[target](https://forum.example/t/topic/20/5)',
     );
-
-    expect(uploadImageAssets).toHaveBeenCalledWith(
-      imageAssets,
-      { apiUrl: DEFAULTS.obsApiUrl, apiKey: 'secret' },
-      expect.any(Object),
-      'Discourse/attachments',
-      123,
-      undefined,
+    const b = document(20, 'https://forum.example', '## #5 ^floor-5');
+    const vault = installMemoryVault({
+      'a.md': a.markdown,
+      'renamed-b.md': b.markdown,
+      'personal.md': '[private](https://forum.example/t/topic/20/5)',
+    });
+    const selected = [
+      {
+        path: 'a.md',
+        title: 'Same Title',
+        topicId: 10,
+        xporterVersion: 2,
+        source: 'https://forum.example/t/topic/10',
+      },
+    ];
+    expect(
+      await refreshObsidianNoteLinks(connection, a.origin, selected),
+    ).toEqual({ updated: 1, ambiguous: 0 });
+    expect(vault.files.get('a.md')).toContain('[[renamed-b#^floor-5|target]]');
+    expect(vault.files.get('personal.md')).toBe(
+      '[private](https://forum.example/t/topic/20/5)',
     );
-    expect(rewriteImageUrlsForObsidian).toHaveBeenCalledWith(
-      '![img](https://cdn.example.com/image.png)',
-      imageAssets,
-      'Discourse/attachments',
-      123,
-    );
-    expect(writeNote).toHaveBeenCalledWith(
-      { apiUrl: DEFAULTS.obsApiUrl, apiKey: 'secret' },
-      'Discourse/Existing.md',
-      'obsidian markdown',
-    );
+    expect(
+      await refreshObsidianNoteLinks(connection, a.origin, selected),
+    ).toEqual({ updated: 0, ambiguous: 0 });
   });
 });

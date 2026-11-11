@@ -1,6 +1,7 @@
 import type {
   BatchItem,
   Config,
+  FilterConfig,
   RangeMode,
   ImageMode,
   ImageDirMode,
@@ -8,24 +9,36 @@ import type {
   PanelCorner,
 } from '../types';
 import { getConfig, saveConfig } from '../config/storage';
+import { restoreExportProfile } from '../core/export-profile';
 import { showToast } from './toast';
+import type { ObsidianBatchReExportSummary } from '../export/obsidian-batch';
 
 export interface PanelCallbacks {
+  onCancelExport?: () => void;
   onExportObsidian: () => Promise<void>;
   onDownloadZip: () => Promise<void>;
   onDownloadMd: () => Promise<void>;
-  onTestConnection: (apiUrl: string, apiKey: string) => Promise<boolean>;
+  onTestConnection: (apiUrl: string) => Promise<boolean>;
+  onImagePathPreview?: (
+    settings: Pick<Config, 'imgDirMode' | 'imgDir' | 'exportDir'>,
+  ) => string;
   onBatchScan: () => Promise<BatchItem[]>;
   onBatchReExport: (
     items: BatchItem[],
     onProgress: (current: number, total: number, title: string) => void,
-  ) => Promise<{ success: number; failed: number }>;
+    replaceSavedSettings: boolean,
+  ) => Promise<ObsidianBatchReExportSummary>;
+  onBatchRefreshLinks?: (
+    items: BatchItem[],
+  ) => Promise<{ updated: number; ambiguous: number }>;
   formatVersion: number;
 }
 
 // ==================== DOM refs ====================
 
 let panelEl: HTMLElement | null = null;
+let credentialStatus: HTMLElement | null = null;
+let refreshImagePath: (() => void) | null = null;
 let progressContainer: HTMLElement | null = null;
 let progressFill: HTMLElement | null = null;
 let progressText: HTMLElement | null = null;
@@ -35,6 +48,7 @@ let batchSectionRefs: BatchSectionRefs | null = null;
 
 // Export button refs (for disabling during export)
 let exportButtons: HTMLButtonElement[] = [];
+let cancelButton: HTMLButtonElement | null = null;
 let exporting = false;
 
 // Batch state
@@ -46,7 +60,7 @@ export interface FilterSectionRefs {
   rangeSelect: HTMLSelectElement;
   rangeStartInput: HTMLInputElement;
   rangeEndInput: HTMLInputElement;
-  onlyOpState: { value: boolean };
+  onlyOpInput: HTMLInputElement;
   imageFilterSelect: HTMLSelectElement;
   usersInput: HTMLInputElement;
   includeKeywordsInput: HTMLInputElement;
@@ -63,13 +77,15 @@ interface BatchSectionRefs {
   statusEl: HTMLElement;
   listEl: HTMLElement;
   startBtn: HTMLButtonElement;
+  refreshLinksBtn: HTMLButtonElement;
   selectionAllBtn: HTMLButtonElement;
   selectionOutdatedBtn: HTMLButtonElement;
   selectionNoneBtn: HTMLButtonElement;
   scanBtn: HTMLButtonElement;
   selectionGroup: HTMLElement;
-  selectionStates: Map<number, boolean>;
-  checkboxEls: Map<number, HTMLInputElement>;
+  replaceSavedSettings: HTMLInputElement;
+  selectionStates: Map<string, boolean>;
+  checkboxEls: Map<string, HTMLInputElement>;
 }
 
 interface BatchSection {
@@ -178,6 +194,8 @@ function cycleCorner(): void {
 function setExporting(val: boolean): void {
   exporting = val;
   for (const btn of exportButtons) btn.disabled = val;
+  if (cancelButton) cancelButton.hidden = !val || !callbacks?.onCancelExport;
+  updateBatchControls();
 }
 
 // ==================== Config save helper ====================
@@ -226,6 +244,14 @@ function buildPanel(cfg: Config): HTMLElement {
     pText,
   ]);
   pContainer.style.display = 'none';
+  cancelButton = h('button', { className: 'dxp-btn-mini' }, [
+    '取消导出',
+  ]) as HTMLButtonElement;
+  cancelButton.hidden = true;
+  cancelButton.addEventListener('click', (event) => {
+    if (event.isTrusted) callbacks?.onCancelExport?.();
+  });
+  pContainer.append(cancelButton);
 
   progressContainer = pContainer;
   progressFill = pFill;
@@ -235,21 +261,24 @@ function buildPanel(cfg: Config): HTMLElement {
   const btnObsidian = h('button', { className: 'dxp-btn dxp-btn-primary' }, [
     '📤 导出到 Obsidian',
   ]) as HTMLButtonElement;
-  btnObsidian.addEventListener('click', () => {
+  btnObsidian.addEventListener('click', (event) => {
+    if (!event.isTrusted) return;
     if (callbacks?.onExportObsidian) void callbacks.onExportObsidian();
   });
 
   const btnZip = h('button', { className: 'dxp-btn dxp-btn-secondary' }, [
     '📦 下载 ZIP',
   ]) as HTMLButtonElement;
-  btnZip.addEventListener('click', () => {
+  btnZip.addEventListener('click', (event) => {
+    if (!event.isTrusted) return;
     if (callbacks?.onDownloadZip) void callbacks.onDownloadZip();
   });
 
   const btnMd = h('button', { className: 'dxp-btn dxp-btn-secondary' }, [
     '📝 下载 Markdown',
   ]) as HTMLButtonElement;
-  btnMd.addEventListener('click', () => {
+  btnMd.addEventListener('click', (event) => {
+    if (!event.isTrusted) return;
     if (callbacks?.onDownloadMd) void callbacks.onDownloadMd();
   });
 
@@ -268,16 +297,14 @@ function buildPanel(cfg: Config): HTMLElement {
     }),
   );
 
-  const inApiKey = h('input', {
-    type: 'password',
-    value: cfg.obsApiKey,
-    placeholder: '留空则不验证',
-  }) as HTMLInputElement;
-  inApiKey.addEventListener('change', () =>
-    patchConfig((c) => {
-      c.obsApiKey = inApiKey.value;
-    }),
-  );
+  const keyStatus = h('div', { className: 'dxp-credential-status' });
+  credentialStatus = keyStatus;
+  refreshCredentialStatus();
+  const keyHint = h('div', { className: 'dxp-hint' }, [
+    import.meta.env.DEV
+      ? '开发模式不允许配置密钥。请使用生产脚本。'
+      : '请从脚本管理器菜单设置、更换或清除 API Key。',
+  ]);
 
   const btnTest = h(
     'button',
@@ -296,16 +323,14 @@ function buildPanel(cfg: Config): HTMLElement {
     },
     [],
   );
-  btnTest.addEventListener('click', async () => {
+  btnTest.addEventListener('click', async (event) => {
+    if (!event.isTrusted) return;
     if (!callbacks) return;
 
     btnTest.textContent = '⏳ 连接中…';
     sslHint.style.display = 'none';
     try {
-      const connected = await callbacks.onTestConnection(
-        inApiUrl.value.trim(),
-        inApiKey.value,
-      );
+      const connected = await callbacks.onTestConnection(inApiUrl.value.trim());
       btnTest.textContent = connected ? '✅ 连接成功' : '❌ 连接失败';
     } catch {
       btnTest.textContent = '❌ 连接失败';
@@ -358,31 +383,23 @@ function buildPanel(cfg: Config): HTMLElement {
     }),
   );
 
-  const imgDirModeLabel = h(
-    'div',
-    {
-      style:
-        'font-size:11px;color:var(--primary-medium,#888);margin-bottom:4px',
-    },
-    [
-      cfg.imgDirMode === 'relative'
-        ? `实际路径: ${cfg.exportDir}/${cfg.imgDir || ''}`.replace(/\/+$/, '')
-        : `实际路径: ${cfg.imgDir}`,
-    ],
-  );
-
+  const imgDirModeLabel = h('div', { className: 'dxp-hint dxp-image-path' });
   function updateImgDirHint(): void {
-    const mode = selImgDirMode.value as ImageDirMode;
-    const dir = inImgDir.value.trim();
-    const exportDir = inExportDir.value.trim();
-    if (mode === 'relative') {
-      inImgDir.placeholder = '留空则存放在导出目录下';
-      imgDirModeLabel.textContent = `实际路径: ${dir ? exportDir + '/' + dir : exportDir}`;
-    } else {
-      inImgDir.placeholder = 'Discourse/attachments';
-      imgDirModeLabel.textContent = `实际路径: ${dir || '(未指定)'}`;
-    }
+    const settings = {
+      imgDirMode: selImgDirMode.value as ImageDirMode,
+      imgDir: inImgDir.value.trim(),
+      exportDir: inExportDir.value.trim(),
+    };
+    inImgDir.placeholder =
+      settings.imgDirMode === 'relative'
+        ? '留空则存放在导出目录下'
+        : 'Discourse/attachments';
+    imgDirModeLabel.textContent = callbacks?.onImagePathPreview
+      ? `实际路径: ${callbacks.onImagePathPreview(settings)}`
+      : '图片路径将在话题页显示';
   }
+  refreshImagePath = updateImgDirHint;
+  updateImgDirHint();
 
   selImgDirMode.addEventListener('change', () => {
     patchConfig((c) => {
@@ -408,7 +425,8 @@ function buildPanel(cfg: Config): HTMLElement {
 
   const obsSection = collapsible('Obsidian 连接设置', [
     field('API 地址', inApiUrl),
-    field('API Key', inApiKey),
+    field('API Key', keyStatus),
+    keyHint,
     btnTest,
     sslHint,
     field('导出目录', inExportDir),
@@ -416,7 +434,17 @@ function buildPanel(cfg: Config): HTMLElement {
     imgDirGroup,
   ]);
 
-  const filterSection = buildFilterSection();
+  const filterSection = buildFilterSection({
+    rangeMode: 'all',
+    rangeStart: 1,
+    rangeEnd: Infinity,
+    onlyOp: false,
+    imgFilter: 'none',
+    users: [],
+    includeKeywords: [],
+    excludeKeywords: [],
+    minLength: 0,
+  });
   filterSectionRefs = filterSection.refs;
 
   // ---- Batch re-export section ----
@@ -500,7 +528,7 @@ function buildPanel(cfg: Config): HTMLElement {
   return panel;
 }
 
-function buildFilterSection(): FilterSection {
+function buildFilterSection(initial: FilterConfig): FilterSection {
   const rangeSelect = h('select', undefined, [
     h('option', { value: 'all' }, ['全部楼层']),
     h('option', { value: 'range' }, ['楼层范围']),
@@ -539,10 +567,11 @@ function buildFilterSection(): FilterSection {
     rangeRow.style.display = rangeSelect.value === 'range' ? 'flex' : 'none';
   });
 
-  const onlyOpState = { value: false };
-  const onlyOpRow = checkboxRow('只看楼主', false, (checked) => {
-    onlyOpState.value = checked;
-  });
+  const onlyOpInput = h('input', { type: 'checkbox' }) as HTMLInputElement;
+  const onlyOpRow = h('label', { className: 'dxp-checkbox-row' }, [
+    onlyOpInput,
+    '只看楼主',
+  ]);
 
   const imageFilterSelect = h('select', undefined, [
     h('option', { value: 'none' }, ['不筛选']),
@@ -569,6 +598,18 @@ function buildFilterSection(): FilterSection {
     min: '0',
   }) as HTMLInputElement;
 
+  const refs: FilterSectionRefs = {
+    rangeSelect,
+    rangeStartInput,
+    rangeEndInput,
+    onlyOpInput,
+    imageFilterSelect,
+    usersInput,
+    includeKeywordsInput,
+    excludeKeywordsInput,
+    minLengthInput,
+  };
+  writePanelFilterConfig(refs, initial);
   return {
     section: collapsible('筛选设置', [
       field('楼层范围', rangeSelect),
@@ -580,17 +621,7 @@ function buildFilterSection(): FilterSection {
       field('排除关键词', excludeKeywordsInput),
       field('最少字数', minLengthInput),
     ]),
-    refs: {
-      rangeSelect,
-      rangeStartInput,
-      rangeEndInput,
-      onlyOpState,
-      imageFilterSelect,
-      usersInput,
-      includeKeywordsInput,
-      excludeKeywordsInput,
-      minLengthInput,
-    },
+    refs,
   };
 }
 
@@ -627,6 +658,18 @@ function buildBatchSection(): BatchSection {
     ['开始重导'],
   ) as HTMLButtonElement;
   startBtn.disabled = true;
+  const refreshLinksBtn = h(
+    'button',
+    {
+      className: 'dxp-btn dxp-btn-secondary',
+      style: 'margin-top:6px;width:100%',
+    },
+    ['更新所选笔记链接'],
+  ) as HTMLButtonElement;
+  refreshLinksBtn.disabled = true;
+  refreshLinksBtn.addEventListener('click', (event) => {
+    if (event.isTrusted) void doBatchRefreshLinks();
+  });
 
   const scanBtn = h(
     'button',
@@ -637,30 +680,45 @@ function buildBatchSection(): BatchSection {
     ['🔍 扫描笔记'],
   ) as HTMLButtonElement;
 
+  const replaceSavedSettings = h('input', {
+    type: 'checkbox',
+    className: 'dxp-batch-profile-override',
+  }) as HTMLInputElement;
+  const replacementRow = h('label', { className: 'dxp-checkbox-row' }, [
+    replaceSavedSettings,
+    '使用当前筛选与输出设置替换各篇历史策略',
+  ]);
+
   const selectionGroup = h(
     'div',
     { className: 'dxp-batch-sel-group', style: 'display:none' },
     [selectionAllBtn, selectionOutdatedBtn, selectionNoneBtn],
   );
 
-  scanBtn.addEventListener('click', () => void doBatchScan());
+  scanBtn.addEventListener('click', (event) => {
+    if (event.isTrusted) void doBatchScan();
+  });
   selectionAllBtn.addEventListener('click', () => batchSelectAll(true));
   selectionOutdatedBtn.addEventListener('click', () => batchSelectOutdated());
   selectionNoneBtn.addEventListener('click', () => batchSelectAll(false));
-  startBtn.addEventListener('click', () => void doBatchExport());
+  startBtn.addEventListener('click', (event) => {
+    if (event.isTrusted) void doBatchExport();
+  });
 
   const container = h('div', undefined, [
     scanBtn,
     statusEl,
     listEl,
     selectionGroup,
+    replacementRow,
     startBtn,
+    refreshLinksBtn,
   ]);
 
   const section = collapsible('批量重导', [container], (open) => {
     if (open && batchCache) {
       renderBatchList(batchCache);
-      void doBatchScan();
+      // Opening a section only renders cached data; privileged reads need a user action.
     }
   });
 
@@ -670,11 +728,13 @@ function buildBatchSection(): BatchSection {
       statusEl,
       listEl,
       startBtn,
+      refreshLinksBtn,
       selectionAllBtn,
       selectionOutdatedBtn,
       selectionNoneBtn,
       scanBtn,
       selectionGroup,
+      replaceSavedSettings,
       selectionStates: new Map(),
       checkboxEls: new Map(),
     },
@@ -682,30 +742,44 @@ function buildBatchSection(): BatchSection {
 }
 
 async function doBatchScan(): Promise<void> {
-  const refs = batchSectionRefs;
-  if (!callbacks || !refs || batchScanning || batchExporting) return;
+  if (batchScanning || batchExporting || exporting) return;
+  await scanBatchNotes();
+}
 
-  const config = getConfig();
-  if (!config.obsApiKey) {
+async function scanBatchNotes(): Promise<boolean> {
+  const refs = batchSectionRefs;
+  if (!callbacks || !refs) return false;
+  if (!getConfig().obsApiKey) {
     showToast('请先配置 Obsidian API Key', 'error');
-    return;
+    return false;
   }
 
   batchScanning = true;
-  refs.scanBtn.disabled = true;
-  refs.scanBtn.textContent = '⏳ 扫描中…';
+  updateBatchControls();
   refs.statusEl.textContent = '扫描中…';
-
   try {
     const items = await callbacks.onBatchScan();
+    const knownPaths = new Set(items.map((item) => item.path));
+    for (const path of refs.selectionStates.keys()) {
+      if (!knownPaths.has(path)) refs.selectionStates.delete(path);
+    }
+    for (const item of items) {
+      if (!refs.selectionStates.has(item.path)) {
+        refs.selectionStates.set(
+          item.path,
+          item.xporterVersion < callbacks.formatVersion,
+        );
+      }
+    }
     batchCache = items;
     renderBatchList(items);
+    return true;
   } catch {
-    refs.statusEl.textContent = '扫描失败';
+    refs.statusEl.textContent = '扫描失败，可重新扫描';
+    return false;
   } finally {
     batchScanning = false;
-    refs.scanBtn.disabled = false;
-    refs.scanBtn.textContent = '🔍 扫描笔记';
+    updateBatchControls();
   }
 }
 
@@ -713,7 +787,6 @@ function renderBatchList(items: BatchItem[]): void {
   const refs = batchSectionRefs;
   if (!refs || !callbacks) return;
   refs.listEl.innerHTML = '';
-  refs.selectionStates.clear();
   refs.checkboxEls.clear();
 
   const formatVersion = callbacks.formatVersion;
@@ -722,6 +795,7 @@ function renderBatchList(items: BatchItem[]): void {
   if (items.length === 0) {
     refs.statusEl.textContent = '未找到来自当前论坛的导出笔记';
     refs.startBtn.disabled = true;
+    refs.refreshLinksBtn.disabled = true;
     return;
   }
 
@@ -729,15 +803,14 @@ function renderBatchList(items: BatchItem[]): void {
   for (const item of items) {
     const isOutdated = item.xporterVersion < formatVersion;
     if (isOutdated) outdatedCount++;
-    refs.selectionStates.set(item.topicId, isOutdated);
 
     const row = h('label', { className: 'dxp-batch-row' });
     const cb = h('input', { type: 'checkbox' }) as HTMLInputElement;
-    cb.checked = isOutdated;
-    refs.checkboxEls.set(item.topicId, cb);
+    cb.checked = refs.selectionStates.get(item.path) ?? false;
+    refs.checkboxEls.set(item.path, cb);
 
     cb.addEventListener('change', () => {
-      refs.selectionStates.set(item.topicId, cb.checked);
+      refs.selectionStates.set(item.path, cb.checked);
       updateBatchStartBtn();
     });
 
@@ -762,7 +835,33 @@ function renderBatchList(items: BatchItem[]): void {
       [item.title],
     );
 
+    if (!item.exportProfile) {
+      titleSpan.title = '缺少可恢复策略；请明确选择当前设置后重导';
+      titleSpan.append(
+        h('span', { className: 'dxp-batch-profile-warning' }, [
+          ' ⚠ 缺少可恢复策略',
+        ]),
+      );
+    }
     row.append(cb, titleSpan, versionSpan);
+    if (item.exportProfile) {
+      const loadFilters = h(
+        'button',
+        { className: 'dxp-btn-mini', type: 'button' },
+        ['载入筛选'],
+      );
+      loadFilters.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (!event.isTrusted || !filterSectionRefs || !item.exportProfile)
+          return;
+        writePanelFilterConfig(
+          filterSectionRefs,
+          restoreExportProfile(item.exportProfile).filters,
+        );
+        showToast(`已载入“${item.title}”的筛选条件`);
+      });
+      row.append(loadFilters);
+    }
     refs.listEl.append(row);
   }
 
@@ -775,9 +874,9 @@ function renderBatchList(items: BatchItem[]): void {
 function batchSelectAll(checked: boolean): void {
   const refs = batchSectionRefs;
   if (!refs) return;
-  for (const [topicId, cb] of refs.checkboxEls) {
+  for (const [path, cb] of refs.checkboxEls) {
     cb.checked = checked;
-    refs.selectionStates.set(topicId, checked);
+    refs.selectionStates.set(path, checked);
   }
   updateBatchStartBtn();
 }
@@ -788,10 +887,9 @@ function batchSelectOutdated(): void {
   const formatVersion = callbacks.formatVersion;
   for (const item of batchCache) {
     const isOutdated = item.xporterVersion < formatVersion;
-    const cb = refs.checkboxEls.get(item.topicId);
+    const cb = refs.checkboxEls.get(item.path);
     if (cb) {
       cb.checked = isOutdated;
-      refs.selectionStates.set(item.topicId, isOutdated);
     }
   }
   updateBatchStartBtn();
@@ -812,49 +910,119 @@ function updateBatchStartBtn(): void {
   if (!refs || !batchCache) return;
   const sel = getBatchSelectedCount();
   refs.startBtn.textContent = `开始重导 (${sel}/${batchCache.length})`;
-  refs.startBtn.disabled = sel === 0 || batchExporting || exporting;
+  refs.startBtn.disabled =
+    sel === 0 || batchExporting || batchScanning || exporting;
+  refs.refreshLinksBtn.disabled =
+    !callbacks?.onBatchRefreshLinks || refs.startBtn.disabled;
+}
+
+function updateBatchControls(): void {
+  const refs = batchSectionRefs;
+  if (!refs) return;
+  const busy = batchScanning || batchExporting || exporting;
+  refs.scanBtn.disabled = busy;
+  refs.replaceSavedSettings.disabled = busy;
+  refs.scanBtn.textContent = batchScanning ? '⏳ 扫描中…' : '🔍 扫描笔记';
+  for (const button of [
+    refs.selectionAllBtn,
+    refs.selectionOutdatedBtn,
+    refs.selectionNoneBtn,
+  ]) {
+    button.disabled = busy;
+  }
+  for (const checkbox of refs.checkboxEls.values()) checkbox.disabled = busy;
+  updateBatchStartBtn();
+  refs.refreshLinksBtn.disabled =
+    !callbacks?.onBatchRefreshLinks || busy || getBatchSelectedCount() === 0;
 }
 
 async function doBatchExport(): Promise<void> {
   const refs = batchSectionRefs;
-  if (!callbacks || !batchCache || !refs || batchExporting || exporting) return;
-
-  const selected = batchCache.filter((it) =>
-    refs.selectionStates.get(it.topicId),
+  if (
+    !callbacks ||
+    !batchCache ||
+    !refs ||
+    batchExporting ||
+    batchScanning ||
+    exporting
+  )
+    return;
+  const selected = batchCache.filter((item) =>
+    refs.selectionStates.get(item.path),
   );
   if (selected.length === 0) return;
 
   batchExporting = true;
-  setExporting(true);
+  updateBatchControls();
   refs.startBtn.textContent = '重导中…';
-  refs.startBtn.disabled = true;
-  refs.scanBtn.disabled = true;
-
   try {
-    const result = await callbacks.onBatchReExport(
+    const summary = await callbacks.onBatchReExport(
       selected,
       (current, total, title) => {
         updateProgress(`重导 ${current}/${total}：${title}`, current / total);
       },
+      refs.replaceSavedSettings.checked,
     );
-
-    const msg = `批量重导完成：${result.success} 成功${result.failed > 0 ? `，${result.failed} 失败` : ''}`;
-    showToast(msg, result.failed > 0 ? 'error' : 'success', 4000);
-
-    // Re-scan to refresh status
-    void doBatchScan();
-  } catch (err) {
+    for (const entry of summary.results) {
+      refs.selectionStates.set(entry.path, entry.status === 'failed');
+    }
+    const counts = `${summary.updated} 更新，${summary.unchanged} 未变化，${summary.failed} 失败`;
+    // The operation owner has finished writing. Hold the local UI through the awaited read refresh.
+    const refreshed = await scanBatchNotes();
+    const message = `批量重导${summary.cancelled ? '已取消' : '完成'}：${counts}${refreshed ? '' : '；状态刷新失败，请重新扫描'}`;
     showToast(
-      `批量重导出错: ${err instanceof Error ? err.message : String(err)}`,
+      message,
+      summary.failed > 0 || !refreshed ? 'error' : 'success',
+      5000,
+    );
+  } catch (error) {
+    showToast(
+      `批量重导出错: ${error instanceof Error ? error.message : String(error)}`,
       'error',
       5000,
     );
   } finally {
     batchExporting = false;
-    setExporting(false);
     resetProgress();
-    refs.scanBtn.disabled = false;
-    updateBatchStartBtn();
+    updateBatchControls();
+  }
+}
+
+async function doBatchRefreshLinks(): Promise<void> {
+  const refs = batchSectionRefs;
+  if (
+    !callbacks?.onBatchRefreshLinks ||
+    !batchCache ||
+    !refs ||
+    batchExporting ||
+    batchScanning ||
+    exporting
+  )
+    return;
+  const selected = batchCache.filter((item) =>
+    refs.selectionStates.get(item.path),
+  );
+  if (selected.length === 0) return;
+  batchExporting = true;
+  updateBatchControls();
+  try {
+    const summary = await callbacks.onBatchRefreshLinks(selected);
+    const refreshed = await scanBatchNotes();
+    showToast(
+      `链接更新完成：${summary.updated} 篇更新，${summary.ambiguous} 个目标不明确${refreshed ? '' : '；状态刷新失败，请重新扫描'}`,
+      summary.ambiguous > 0 || !refreshed ? 'info' : 'success',
+      5000,
+    );
+  } catch (error) {
+    showToast(
+      `链接更新出错: ${error instanceof Error ? error.message : String(error)}`,
+      'error',
+      5000,
+    );
+  } finally {
+    batchExporting = false;
+    resetProgress();
+    updateBatchControls();
   }
 }
 
@@ -870,6 +1038,8 @@ export function initPanel(cb: PanelCallbacks): void {
 }
 
 export function showPanel(): void {
+  refreshCredentialStatus();
+  refreshPathPreview();
   if (panelEl) panelEl.style.display = '';
 }
 
@@ -879,6 +1049,8 @@ export function hidePanel(): void {
 
 export function togglePanel(): void {
   if (!panelEl) return;
+  refreshCredentialStatus();
+  refreshPathPreview();
   panelEl.style.display = panelEl.style.display === 'none' ? '' : 'none';
 }
 
@@ -903,20 +1075,10 @@ export function setExportLock(locked: boolean): void {
   setExporting(locked);
 }
 
-export interface PanelFilterConfig {
-  rangeMode: RangeMode;
-  rangeStart: number;
-  rangeEnd: number;
-  onlyOp: boolean;
-  imgFilter: ImageFilter;
-  users: string[];
-  includeKeywords: string[];
-  excludeKeywords: string[];
-  minLength: number;
-}
+export type PanelFilterConfig = FilterConfig;
 
 export function getPanelFilterConfig(): PanelFilterConfig {
-  if (!filterSectionRefs) return defaultPanelFilterConfig();
+  if (!filterSectionRefs) throw new Error('导出面板尚未初始化');
   return readPanelFilterConfig(filterSectionRefs);
 }
 
@@ -927,7 +1089,7 @@ export function readPanelFilterConfig(
     rangeMode: refs.rangeSelect.value as RangeMode,
     rangeStart: Math.max(1, Number(refs.rangeStartInput.value) || 1),
     rangeEnd: Number(refs.rangeEndInput.value) || Infinity,
-    onlyOp: refs.onlyOpState.value,
+    onlyOp: refs.onlyOpInput.checked,
     imgFilter: refs.imageFilterSelect.value as ImageFilter,
     users: splitFilterTerms(refs.usersInput.value),
     includeKeywords: splitFilterTerms(refs.includeKeywordsInput.value),
@@ -936,18 +1098,22 @@ export function readPanelFilterConfig(
   };
 }
 
-function defaultPanelFilterConfig(): PanelFilterConfig {
-  return {
-    rangeMode: 'all',
-    rangeStart: 1,
-    rangeEnd: Infinity,
-    onlyOp: false,
-    imgFilter: 'none',
-    users: [],
-    includeKeywords: [],
-    excludeKeywords: [],
-    minLength: 0,
-  };
+export function writePanelFilterConfig(
+  refs: FilterSectionRefs,
+  filters: FilterConfig,
+): void {
+  refs.rangeSelect.value = filters.rangeMode;
+  refs.rangeStartInput.value = String(filters.rangeStart);
+  refs.rangeEndInput.value = Number.isFinite(filters.rangeEnd)
+    ? String(filters.rangeEnd)
+    : '';
+  refs.onlyOpInput.checked = filters.onlyOp;
+  refs.imageFilterSelect.value = filters.imgFilter;
+  refs.usersInput.value = filters.users.join(', ');
+  refs.includeKeywordsInput.value = filters.includeKeywords.join(', ');
+  refs.excludeKeywordsInput.value = filters.excludeKeywords.join(', ');
+  refs.minLengthInput.value = String(filters.minLength);
+  refs.rangeSelect.dispatchEvent(new Event('change'));
 }
 
 function splitFilterTerms(value: string): string[] {
@@ -955,4 +1121,14 @@ function splitFilterTerms(value: string): string[] {
     .split(/[,，]/)
     .map((term) => term.trim())
     .filter(Boolean);
+}
+
+/** A status flag is the only credential information placed in the shared page DOM. */
+export function refreshCredentialStatus(): void {
+  if (credentialStatus)
+    credentialStatus.textContent = getConfig().obsApiKey ? '已配置' : '未配置';
+}
+
+export function refreshPathPreview(): void {
+  refreshImagePath?.();
 }

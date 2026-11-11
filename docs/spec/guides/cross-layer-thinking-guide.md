@@ -79,8 +79,8 @@ src/ui/* 通过回调触发流程，不拥有导出业务规则。
 
 正确边界：
 
-- raw pipeline 把同话题引用转为 `[[#^floor-N|#N]]`。
-- formatter 确保每个楼层标题包含 `^floor-N`。
+- formatter 根据实际楼层和模板生成能力确定可用的 `^floor-N` 目标集合。
+- raw/cooked 引用与 formatter 的回复/解决方案只在该集合内生成 `[[#^floor-N|#N]]`，其余保留网页 URL。
 - 高亮摘要复用同一 block ref 规则。
 
 错误做法：

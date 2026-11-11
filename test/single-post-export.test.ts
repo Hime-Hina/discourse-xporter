@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULTS } from '../src/config/defaults';
 import { fetchPostById, fetchTopic, resolveUploadUrls } from '../src/core/api';
 import { buildSinglePostMarkdown } from '../src/core/single-post-export';
+import { processPost } from '../src/core/formatter';
 import type { DiscoursePost, DiscourseTopic } from '../src/types';
 
 vi.mock('../src/core/api', () => ({
@@ -13,7 +13,7 @@ vi.mock('../src/core/api', () => ({
 function post(overrides: Partial<DiscoursePost> = {}): DiscoursePost {
   const postNumber = overrides.post_number ?? 1;
   return {
-    id: postNumber,
+    id: postNumber * 1001,
     post_number: postNumber,
     post_type: 1,
     username: 'alice',
@@ -110,7 +110,6 @@ describe('buildSinglePostMarkdown', () => {
       postNumber: 1,
       postId: 1001,
       origin: 'https://example.com',
-      config: { ...DEFAULTS },
     });
 
     expect(markdown).toContain('![alt](https://cdn.example.com/abc.png)');
@@ -129,11 +128,12 @@ describe('buildSinglePostMarkdown', () => {
         postNumber: 9,
         postId: 2002,
         origin: 'https://example.com',
-        config: { ...DEFAULTS },
       }),
     ).resolves.toBe('Fetched post');
 
-    expect(fetchPostById).toHaveBeenCalledWith(123, 2002);
+    expect(fetchPostById).toHaveBeenCalledWith(123, 2002, {
+      origin: 'https://example.com',
+    });
   });
 
   it('uses cooked fallback when raw Markdown is unavailable', async () => {
@@ -151,7 +151,6 @@ describe('buildSinglePostMarkdown', () => {
       postNumber: 1,
       postId: 1001,
       origin: 'https://example.com',
-      config: { ...DEFAULTS },
     });
 
     expect(markdown).toContain('Hello **cooked**');
@@ -166,8 +165,36 @@ describe('buildSinglePostMarkdown', () => {
         postNumber: 7,
         postId: 7007,
         origin: 'https://example.com',
-        config: { ...DEFAULTS },
       }),
     ).rejects.toThrow('Post #7 was not found in topic 123');
   });
+});
+
+it('keeps real single-post and topic post bodies equal for raw, cooked and quote content', async () => {
+  for (const raw of [
+    'Hello :smile:',
+    undefined,
+    '[quote="alice, post:9, topic:123"]Quoted[/quote]',
+  ]) {
+    const source = post({
+      raw,
+      cooked: '<p>Hello <strong>cooked</strong></p>',
+    });
+    vi.mocked(fetchTopic).mockResolvedValue(topic([source]));
+    const singleBody = await buildSinglePostMarkdown({
+      topicId: 123,
+      postNumber: 1,
+      postId: source.id,
+      origin: 'https://example.com',
+    });
+    const context = {
+      origin: 'https://example.com',
+      topicId: 123,
+      uploadMap: new Map<string, string>(),
+      polls: [],
+      cookedHtml: source.cooked,
+    };
+    const topicBody = processPost(source, 10, context, false).content;
+    expect(singleBody).toBe(topicBody);
+  }
 });

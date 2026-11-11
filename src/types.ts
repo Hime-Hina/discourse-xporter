@@ -23,7 +23,9 @@ export interface DiscourseTopic {
   image_url: string | null;
   post_stream: {
     posts: DiscoursePost[];
-    stream: number[];
+    stream?: number[];
+    isMegaTopic?: boolean;
+    lastId?: number;
   };
   details: {
     participants: DiscourseParticipant[];
@@ -158,7 +160,11 @@ export type ImageMode = 'file' | 'embed' | 'none';
 export type ImageDirMode = 'relative' | 'absolute';
 export type ImageFilter = 'none' | 'withImg' | 'noImg';
 export type RangeMode = 'all' | 'range' | 'selected';
-export type PanelCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+export type PanelCorner =
+  | 'top-left'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-right';
 
 export interface Config {
   // Export
@@ -214,10 +220,9 @@ export interface ProcessedPost {
 export interface PipelineContext {
   origin: string;
   topicId: number;
-  topicSlug: string;
   polls: DiscoursePoll[];
   cookedHtml: string;
-  config: Config;
+  renderedPostNumbers?: ReadonlySet<number>;
   uploadMap: Map<string, string>;
 }
 
@@ -258,4 +263,17 @@ export interface BatchItem {
   title: string;
   topicId: number;
   xporterVersion: number;
+  source: string;
+  exportProfile?: ExportProfile;
+}
+
+/** Only options which determine a document's content or attachment layout. */
+export interface ExportProfile {
+  version: 1;
+  filters: Omit<FilterConfig, 'rangeEnd'> & { rangeEnd: number | null };
+  selectedPosts: { postNumber: number; postId: number }[];
+  output: Pick<
+    Config,
+    'exportDir' | 'imgMode' | 'imgDirMode' | 'imgDir' | 'floorTemplate'
+  >;
 }

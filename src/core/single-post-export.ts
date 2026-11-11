@@ -1,45 +1,37 @@
-import type { Config, PipelineContext } from '../types';
+import { postToMarkdown } from './post-content';
+import { protectMarkdownCode } from '../utils/markdown-code';
 import { fetchPostById, fetchTopic, resolveUploadUrls } from './api';
-import { cookedToMarkdown } from './cooked-fallback';
-import { processRaw } from './raw-pipeline';
 
 export interface SinglePostMarkdownRequest {
   topicId: number;
   postNumber: number;
   postId: number;
   origin: string;
-  config: Config;
 }
 
 export async function buildSinglePostMarkdown(
   request: SinglePostMarkdownRequest,
 ): Promise<string> {
-  const topic = await fetchTopic(request.topicId);
+  const { topicId, postId, postNumber, origin } = request;
+  const context = { origin };
+  const topic = await fetchTopic(topicId, context);
   const post =
     topic.post_stream.posts.find(
-      (candidate) => candidate.post_number === request.postNumber,
-    ) ?? (await fetchPostById(request.topicId, request.postId));
+      (candidate) => candidate.post_number === postNumber,
+    ) ?? (await fetchPostById(topicId, postId, context));
 
-  if (!post) {
-    throw new Error(
-      `Post #${request.postNumber} was not found in topic ${request.topicId}`,
-    );
+  if (!post || post.id !== postId || post.post_number !== postNumber) {
+    throw new Error(`Post #${postNumber} was not found in topic ${topicId}`);
   }
 
-  const uploadUrls = post.raw?.match(/upload:\/\/[a-zA-Z0-9._-]+/g) ?? [];
-  const uploadMap = await resolveUploadUrls(uploadUrls);
-  const pipelineContext: PipelineContext = {
-    origin: request.origin,
-    topicId: request.topicId,
-    topicSlug: topic.slug,
-    polls: post.polls ?? [],
-    cookedHtml: post.cooked,
-    config: request.config,
+  const uploadUrls =
+    protectMarkdownCode(post.raw ?? '').text.match(
+      /upload:\/\/[a-zA-Z0-9._-]+/g,
+    ) ?? [];
+  const uploadMap = await resolveUploadUrls(uploadUrls, context);
+  return postToMarkdown(post, {
+    origin,
+    topicId,
     uploadMap,
-  };
-
-  if (post.raw) {
-    return processRaw(post.raw, pipelineContext);
-  }
-  return cookedToMarkdown(post.cooked);
+  });
 }
